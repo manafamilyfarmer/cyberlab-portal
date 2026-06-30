@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CyberLab Portal — Me</title></head>
+<body>
+  <h1>Signed in</h1>
+  <ul>
+    <li>Username: {{ user_obj.username }}</li>
+    <li>Role: {{ user_obj.role }}</li>
+    <li>MFA enabled: {{ user_obj.mfa_enabled }}</li>
+    <li>Verified this session: {{ user_obj.is_verified }}</li>
+  </ul>
+  <form method="post" action="{% url 'api-logout' %}">{% csrf_token %}<button>Log out</button></form>
+</body>
+</html>

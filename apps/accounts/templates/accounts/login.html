@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CyberLab Portal — Login</title></head>
+<body>
+  <h1>CyberLab Portal</h1>
+  <h2>Sign in</h2>
+  {% if error %}<p style="color:red">{{ error }}</p>{% endif %}
+  <form method="post" action="{% url 'login-page' %}">
+    {% csrf_token %}
+    <p><label>Username <input type="text" name="username" autofocus></label></p>
+    <p><label>Password <input type="password" name="password"></label></p>
+    <p><button type="submit">Log in</button></p>
+  </form>
+  <p>Staff accounts must enrol a TOTP authenticator on first login.</p>
+</body>
+</html>

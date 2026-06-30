@@ -15,7 +15,10 @@ SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
 
-ALLOWED_HOSTS = ["192.168.100.92", "127.0.0.1", "localhost"]
+ALLOWED_HOSTS = ["192.168.100.92", "127.0.0.1", "localhost", "testserver"]
+
+# Custom user model (B1 Step 3).
+AUTH_USER_MODEL = "accounts.User"
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -28,13 +31,20 @@ INSTALLED_APPS = [
     "rest_framework",
     "django_otp",
     "django_otp.plugins.otp_totp",
-    # local apps (no models yet)
+    "axes",
+    # local apps
     "apps.accounts",
+    "apps.audit",
     "apps.curriculum",
     "apps.labs",
     "apps.assessments",
     "apps.provisioning",
-    "apps.audit",
+]
+
+# Axes backend FIRST so lockouts are enforced during authenticate().
+AUTHENTICATION_BACKENDS = [
+    "axes.backends.AxesStandaloneBackend",
+    "django.contrib.auth.backends.ModelBackend",
 ]
 
 MIDDLEWARE = [
@@ -43,9 +53,12 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # django_otp after authentication
     "django_otp.middleware.OTPMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # django-axes must be LAST
+    "axes.middleware.AxesMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -97,6 +110,32 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# --- Sessions (B0 §13 auth hardening) ---
+SESSION_COOKIE_AGE = 3600
+SESSION_SAVE_EVERY_REQUEST = True          # sliding idle timeout
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+# httponly + samesite always on; the secure flag is env-gated in prod.py.
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = "Lax"
+
+# --- Login lockout (django-axes) ---
+AXES_FAILURE_LIMIT = 5
+AXES_COOLOFF_TIME = 1  # hours
+AXES_LOCKOUT_PARAMETERS = [["username", "ip_address"]]
+AXES_RESET_ON_SUCCESS = True
+
+# --- Django REST Framework ---
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+}
 
 # Celery (redis on the internal compose network)
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")

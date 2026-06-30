@@ -1,5 +1,5 @@
 from django.contrib import admin
-from django.urls import path
+from django.urls import include, path
 
 from . import health
 
@@ -7,4 +7,5 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("healthz/", health.healthz, name="healthz"),
     path("readyz/", health.readyz, name="readyz"),
+    path("", include("apps.accounts.urls")),
 ]

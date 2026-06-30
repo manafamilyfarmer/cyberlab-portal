@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CyberLab Portal — Enrol TOTP</title></head>
+<body>
+  <h1>Enrol your authenticator</h1>
+  <p>Scan this QR code with your TOTP app (Google Authenticator, Aegis, etc.),
+     then enter a current 6-digit code to confirm.</p>
+  {% if message %}<p style="color:red">{{ message }}</p>{% endif %}
+  {% if qr_data_uri %}<p><img alt="TOTP QR" src="{{ qr_data_uri }}"></p>{% endif %}
+  <form method="post" action="{% url 'totp-enroll' %}">
+    {% csrf_token %}
+    <p><label>6-digit code <input type="text" name="token" inputmode="numeric"></label></p>
+    <p><button type="submit">Confirm</button></p>
+  </form>
+</body>
+</html>
