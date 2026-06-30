@@ -1,0 +1,39 @@
+services:
+  web:
+    build: .
+    image: cyberlab-portal:latest
+    command: ["gunicorn", "config.wsgi:application", "-b", "0.0.0.0:8000", "--workers", "3", "--timeout", "60"]
+    # Secrets are bind-mounted read-only and loaded by the entrypoint as root,
+    # then the process drops to the non-root "app" user. The host files stay
+    # root:root 600 and never enter the build context.
+    volumes:
+      - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
+    ports:
+      # Bind to VM114's internal interface only — never 0.0.0.0 / public.
+      - "192.168.100.92:8000:8000"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  worker:
+    image: cyberlab-portal:latest
+    command: ["celery", "-A", "config", "worker", "-l", "info"]
+    volumes:
+      - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  beat:
+    image: cyberlab-portal:latest
+    command: ["celery", "-A", "config", "beat", "-l", "info"]
+    volumes:
+      - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Internal to the compose network only — NO published host port.
+    restart: unless-stopped

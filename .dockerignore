@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+*.env
+secrets/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+db.sqlite3
+*.log
+staticfiles/
+README.md

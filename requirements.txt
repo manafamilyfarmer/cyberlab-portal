@@ -1,0 +1,9 @@
+django>=5.0,<5.2
+djangorestframework
+celery
+redis
+psycopg[binary]
+gunicorn
+django-otp
+qrcode
+python-dotenv
