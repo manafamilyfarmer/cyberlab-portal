@@ -8,3 +8,4 @@ django-otp
 django-axes
 qrcode
 python-dotenv
+requests
