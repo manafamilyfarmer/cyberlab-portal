@@ -8,10 +8,17 @@ services:
     # root:root 600 and never enter the build context.
     volumes:
       - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
+      # Public PVE cluster CA (NOT a secret) used to genuinely verify the
+      # Proxmox API TLS cert. Read-only; the app reads it via PORTAL_PVE_CA_BUNDLE.
+      - /opt/cyberlab-portal/certs:/run/portal-certs:ro
       - submissions:/var/cyberlab-submissions
     ports:
       # Bind to VM114's internal interface only — never 0.0.0.0 / public.
       - "192.168.100.92:8000:8000"
+    # The PVE leaf cert has no SAN for the mgmt IP; connect by the covered name
+    # proxmox.cyberlab, pinned here to the documented mgmt IP so TLS verifies.
+    extra_hosts:
+      - "proxmox.cyberlab:192.168.100.1"
     depends_on:
       - redis
     restart: unless-stopped
@@ -21,7 +28,10 @@ services:
     command: ["celery", "-A", "config", "worker", "-l", "info"]
     volumes:
       - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
+      - /opt/cyberlab-portal/certs:/run/portal-certs:ro
       - submissions:/var/cyberlab-submissions
+    extra_hosts:
+      - "proxmox.cyberlab:192.168.100.1"
     depends_on:
       - redis
       - clamav

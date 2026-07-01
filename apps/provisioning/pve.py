@@ -18,6 +18,7 @@ never silently disabled.
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 import requests
@@ -65,8 +66,6 @@ def parse_env_file(path: str) -> dict:
 
 class ProxmoxClient:
     def __init__(self, env_path: str | None = None):
-        import os
-
         if env_path is None:
             if os.access(DEFAULT_ENV_PATH, os.R_OK):
                 env_path = DEFAULT_ENV_PATH
@@ -90,22 +89,44 @@ class ProxmoxClient:
         self.node = cfg.get("PORTAL_PVE_NODE", "proxmox")
         self.pool = cfg.get("PORTAL_PVE_POOL", "cyberlab-agent")
 
+        # TLS verification resolves to one of three states, honestly:
+        #   * verify off  -> self.verify is False (LOUD, temporary override only)
+        #   * CA bundle    -> self.verify is the bundle PATH (genuine verification
+        #                     against the trusted PVE cluster CA)
+        #   * else on      -> self.verify is True (system trust store; a self-signed
+        #                     PVE cert then fails LOUDLY -- never silently ignored)
+        # We never hardcode verification off.
         verify_flag = cfg.get("PORTAL_PVE_VERIFY_TLS", "1").strip().lower()
-        # Only an explicit falsey value disables verification; anything else = on.
-        self.verify = verify_flag not in ("0", "false", "no", "off")
+        verify_on = verify_flag not in ("0", "false", "no", "off")
+        ca_bundle = cfg.get("PORTAL_PVE_CA_BUNDLE", "").strip()
+
+        if not verify_on:
+            self.verify = False
+        elif ca_bundle:
+            if not os.access(ca_bundle, os.R_OK):
+                # Refuse to silently downgrade to an unverified or system-store
+                # connection when the operator explicitly configured a CA bundle.
+                raise ProxmoxAPIError(
+                    f"PORTAL_PVE_CA_BUNDLE={ca_bundle} is not readable; refusing "
+                    "to fall back to an unverified connection. Fix the mount/path "
+                    "or unset PORTAL_PVE_CA_BUNDLE."
+                )
+            self.verify = ca_bundle
+        else:
+            self.verify = True
 
         self._session = requests.Session()
         self._session.headers["Authorization"] = (
             f"PVEAPIToken={self._token_id}={self._token_secret}"
         )
-        if not self.verify:
+        if self.verify is False:
             # Honest + loud: we do NOT hardcode this; it is driven by the env
-            # flag the operator set as a TEMPORARY measure. Follow-up: trust the
-            # PVE cluster CA (/etc/pve/pve-root-ca.pem) in the worker, then =1.
+            # flag the operator set as a TEMPORARY measure. Follow-up: point
+            # PORTAL_PVE_CA_BUNDLE at the trusted PVE cluster CA, then =1.
             logger.warning(
                 "PORTAL_PVE_VERIFY_TLS=0 -> TLS certificate verification is "
                 "DISABLED (temporary). FOLLOW-UP(HIGH): trust the PVE CA in the "
-                "worker and restore PORTAL_PVE_VERIFY_TLS=1."
+                "worker (PORTAL_PVE_CA_BUNDLE) and restore PORTAL_PVE_VERIFY_TLS=1."
             )
             try:
                 import urllib3
@@ -113,6 +134,10 @@ class ProxmoxClient:
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             except Exception:  # pragma: no cover - best-effort noise suppression
                 pass
+        elif isinstance(self.verify, str):
+            logger.info(
+                "TLS verification ON against pinned CA bundle %s", self.verify
+            )
 
     # ------------------------------------------------------------------ guards
     def _guard(self, vmid, op: str) -> int:
