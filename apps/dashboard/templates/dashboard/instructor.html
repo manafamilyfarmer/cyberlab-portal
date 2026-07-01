@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CyberLab — Instructor Dashboard</title></head>
+<body>
+  <h1>Instructor dashboard — {{ user_obj.username }}</h1>
+  {% with s=summary.instructor %}
+  <ul>
+    <li>My batches: {{ s.batches }}</li>
+    <li>Students in my batches: {{ s.students }}</li>
+    <li>Exercises in scope: {{ s.exercises }}</li>
+    <li>Submissions in scope: {{ s.submissions.total }}
+        (clean {{ s.submissions.clean }}, pending {{ s.submissions.pending }},
+         infected {{ s.submissions.infected }})</li>
+    <li>Assessments in scope: {{ s.assessments }}</li>
+    <li>Schedules: {{ s.schedules }}</li>
+    <li>Access sessions: {{ s.access_sessions }}</li>
+    <li>Audit events visible: {{ s.audit_events_visible }}</li>
+  </ul>
+  {% endwith %}
+  <p><a href="{% url 'audit-page' %}">Audit log</a> · <a href="{% url 'me-page' %}">Account</a></p>
+</body>
+</html>

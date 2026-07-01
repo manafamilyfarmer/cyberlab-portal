@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CyberLab — Student Dashboard</title></head>
+<body>
+  <h1>Student dashboard — {{ user_obj.username }}</h1>
+  {% with s=summary.student %}
+  <ul>
+    <li>Enrolled batches: {{ s.batches }}</li>
+    <li>Available exercises: {{ s.exercises }}</li>
+    <li>My submissions: {{ s.submissions.total }}
+        (clean {{ s.submissions.clean }}, pending {{ s.submissions.pending }},
+         infected {{ s.submissions.infected }}, error {{ s.submissions.error }})</li>
+    <li>Final assessments: {{ s.assessments_final }}</li>
+    <li>Active schedules: {{ s.active_schedules }}</li>
+    <li>Access sessions: {{ s.access_sessions }}</li>
+    <li>Reservations: {{ s.reservations }}</li>
+  </ul>
+  {% endwith %}
+  <p><a href="{% url 'me-page' %}">Account</a></p>
+</body>
+</html>

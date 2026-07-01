@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CyberLab — Admin Dashboard</title></head>
+<body>
+  <h1>Admin dashboard — {{ user_obj.username }}</h1>
+  {% with s=summary.admin %}
+  <ul>
+    <li>Courses: {{ s.courses }}</li>
+    <li>Batches: {{ s.batches }}</li>
+    <li>Exercises: {{ s.exercises }}</li>
+    <li>Students: {{ s.students }}</li>
+    <li>Submissions: {{ s.submissions.total }}
+        (clean {{ s.submissions.clean }}, pending {{ s.submissions.pending }},
+         infected {{ s.submissions.infected }}, error {{ s.submissions.error }})</li>
+    <li>Assessments: {{ s.assessments }}</li>
+    <li>Schedules: {{ s.schedules }}</li>
+    <li>Access sessions: {{ s.access_sessions }}</li>
+    <li>IP pool: {{ s.ip_pool.free }} free / {{ s.ip_pool.leased }} leased / {{ s.ip_pool.total }} total</li>
+    <li>Audit events: {{ s.audit_events }}</li>
+  </ul>
+  {% endwith %}
+  <p><a href="{% url 'audit-page' %}">Audit log</a> · <a href="{% url 'me-page' %}">Account</a></p>
+</body>
+</html>

@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     "apps.scheduling",
     "apps.assessments",
     "apps.provisioning",
+    "apps.dashboard",
 ]
 
 # Axes backend FIRST so lockouts are enforced during authenticate().
