@@ -8,6 +8,7 @@ services:
     # root:root 600 and never enter the build context.
     volumes:
       - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
+      - submissions:/var/cyberlab-submissions
     ports:
       # Bind to VM114's internal interface only — never 0.0.0.0 / public.
       - "192.168.100.92:8000:8000"
@@ -20,8 +21,10 @@ services:
     command: ["celery", "-A", "config", "worker", "-l", "info"]
     volumes:
       - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
+      - submissions:/var/cyberlab-submissions
     depends_on:
       - redis
+      - clamav
     restart: unless-stopped
 
   beat:
@@ -37,3 +40,15 @@ services:
     image: redis:7-alpine
     # Internal to the compose network only — NO published host port.
     restart: unless-stopped
+
+  clamav:
+    image: clamav/clamav:latest
+    # Internal to the compose network only — NO published host port.
+    # Fetches signatures on first start (needs egress + a few minutes).
+    volumes:
+      - clamav_db:/var/lib/clamav
+    restart: unless-stopped
+
+volumes:
+  submissions:
+  clamav_db:

@@ -141,3 +141,22 @@ REST_FRAMEWORK = {
 # Celery (redis on the internal compose network)
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
+
+# --- Submissions (hostile-upload pipeline, B0 §13/§20) ---
+# Dedicated volume OUTSIDE the web root / any URL-served path. Never under /app.
+SUBMISSIONS_DIR = os.environ.get("SUBMISSIONS_DIR", "/var/cyberlab-submissions")
+SUBMISSION_MAX_BYTES = int(os.environ.get("SUBMISSION_MAX_BYTES", str(10 * 1024 * 1024)))
+SUBMISSION_ALLOWED_TYPES = [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "application/pdf",
+    "text/plain",
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/gzip",
+    "application/x-tar",
+]
+# ClamAV clamd (internal compose network; INSTREAM scan, no shared volume).
+CLAMAV_HOST = os.environ.get("CLAMAV_HOST", "clamav")
+CLAMAV_PORT = int(os.environ.get("CLAMAV_PORT", "3310"))

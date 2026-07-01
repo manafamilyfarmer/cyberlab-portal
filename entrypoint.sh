@@ -13,7 +13,14 @@ for f in /run/portal-secrets/portaldb.env /run/portal-secrets/portal-app.env; do
     fi
 done
 
+# Ensure the submissions volume exists, owned by the app user, mode 700
+# (files themselves are written 0600 by the upload view). Runs as root before
+# dropping privileges so the daemon-mounted volume gets the right ownership.
+SUBMISSIONS_DIR="${SUBMISSIONS_DIR:-/var/cyberlab-submissions}"
 if [ "$(id -u)" = "0" ]; then
+    mkdir -p "$SUBMISSIONS_DIR"
+    chown app:app "$SUBMISSIONS_DIR"
+    chmod 700 "$SUBMISSIONS_DIR"
     exec gosu app "$@"
 fi
 exec "$@"
