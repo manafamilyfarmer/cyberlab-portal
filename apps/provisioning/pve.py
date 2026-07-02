@@ -240,7 +240,38 @@ class ProxmoxClient:
             raise ProxmoxAPIError(f"clone {source}->{target} returned no UPID")
         return upid
 
+    def start(self, vmid):
+        """Power ON (async) -> UPID."""
+        vmid = self._guard(vmid, "start")
+        resp = self._request(
+            "POST", f"/nodes/{self.node}/qemu/{vmid}/status/start"
+        )
+        if resp.status_code not in (200, 201):
+            raise ProxmoxAPIError(
+                f"start {vmid} failed HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        upid = (self._json(resp) or {}).get("data")
+        if not upid:
+            raise ProxmoxAPIError(f"start {vmid} returned no UPID")
+        return upid
+
+    def shutdown(self, vmid):
+        """GRACEFUL power off (ACPI / guest shutdown, async) -> UPID."""
+        vmid = self._guard(vmid, "shutdown")
+        resp = self._request(
+            "POST", f"/nodes/{self.node}/qemu/{vmid}/status/shutdown"
+        )
+        if resp.status_code not in (200, 201):
+            raise ProxmoxAPIError(
+                f"shutdown {vmid} failed HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        upid = (self._json(resp) or {}).get("data")
+        if not upid:
+            raise ProxmoxAPIError(f"shutdown {vmid} returned no UPID")
+        return upid
+
     def stop(self, vmid):
+        """FORCE power off (equivalent to pulling the plug, async) -> UPID."""
         vmid = self._guard(vmid, "stop")
         resp = self._request(
             "POST", f"/nodes/{self.node}/qemu/{vmid}/status/stop"
@@ -250,6 +281,24 @@ class ProxmoxClient:
                 f"stop {vmid} failed HTTP {resp.status_code}: {resp.text[:300]}"
             )
         return (self._json(resp) or {}).get("data")
+
+    def guest_ping(self, vmid):
+        """Best-effort guest-agent ping. Templates without qemu-guest-agent
+        return 500 ("No QEMU guest agent configured"); tolerate that gracefully
+        and never raise -- liveness still falls back to status==running."""
+        vmid = self._guard(vmid, "agent_ping")
+        try:
+            resp = self._request(
+                "GET", f"/nodes/{self.node}/qemu/{vmid}/agent/ping"
+            )
+        except ProxmoxAPIError as exc:
+            return {"ok": False, "available": False, "error": str(exc)[:200]}
+        return {
+            "http": resp.status_code,
+            "ok": resp.status_code == 200,
+            "available": resp.status_code == 200,
+            "data": (self._json(resp) or {}).get("data"),
+        }
 
     def destroy(self, vmid, *, purge=True):
         vmid = self._guard(vmid, "destroy")
@@ -289,3 +338,22 @@ class ProxmoxClient:
                 return last
             time.sleep(interval)
         raise ProxmoxAPIError(f"task {upid} did not finish within {timeout}s; last={last}")
+
+    def wait_status(self, vmid, want, *, timeout=120, interval=2.0):
+        """Poll status/current until the VM power status == want, with a HARD
+        cap. Does NOT raise on cap breach: returns reached=False so the caller
+        can escalate (e.g. graceful shutdown -> force stop) and still tear down.
+        Returns {status, reached, waited_s[, timeout_s]}."""
+        vmid = self._guard(vmid, "wait_status")
+        start = time.monotonic()
+        deadline = start + timeout
+        last = None
+        while time.monotonic() < deadline:
+            st = self.get_status(vmid)
+            last = (st.get("data") or {}).get("status")
+            if last == want:
+                return {"status": last, "reached": True,
+                        "waited_s": round(time.monotonic() - start, 1)}
+            time.sleep(interval)
+        return {"status": last, "reached": False, "timeout_s": timeout,
+                "waited_s": round(time.monotonic() - start, 1)}
