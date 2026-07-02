@@ -215,6 +215,27 @@ class ProxmoxClient:
             "data": (self._json(resp) or {}).get("data"),
         }
 
+    def list_target_vmids(self):
+        """Read-only enumeration: 9000-range VMIDs currently present on the node
+        (any power state). Used by the allocator to avoid colliding with a live
+        VM. Enumeration only — never an operation on any listed VM, and every
+        non-target VMID (incl. NEVER_TOUCH) is filtered out of the result."""
+        resp = self._request("GET", f"/nodes/{self.node}/qemu")
+        if resp.status_code != 200:
+            raise ProxmoxAPIError(
+                f"list qemu HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        data = (self._json(resp) or {}).get("data") or []
+        out = []
+        for vm in data:
+            try:
+                vmid = int(vm.get("vmid"))
+            except (TypeError, ValueError):
+                continue
+            if _in_target_range(vmid):
+                out.append(vmid)
+        return sorted(out)
+
     # ----------------------------------------------------------- guarded writes
     def clone(self, source, target, name, *, full=True, pool=None):
         source = self._guard(source, "clone_source")

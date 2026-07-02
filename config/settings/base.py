@@ -143,6 +143,11 @@ REST_FRAMEWORK = {
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
 
+# B2 provisioning: max concurrently-held lab instances (pending+running). The
+# capacity guard rejects new provisions past this cap (honored in the worker and
+# in the web DB pre-check).
+PROVISION_MAX_CONCURRENT = int(os.environ.get("PROVISION_MAX_CONCURRENT", "10"))
+
 # --- Submissions (hostile-upload pipeline, B0 §13/§20) ---
 # Dedicated volume OUTSIDE the web root / any URL-served path. Never under /app.
 SUBMISSIONS_DIR = os.environ.get("SUBMISSIONS_DIR", "/var/cyberlab-submissions")

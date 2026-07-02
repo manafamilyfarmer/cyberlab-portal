@@ -28,6 +28,7 @@ from apps.audit.services import write_audit
 from apps.curriculum.models import Course, LabExercise, Module
 from apps.labs.models import IPLease, LabInstance, LabTemplate, Role, VMInstance
 
+from .allocation import allocate_vmid, capacity_ok, lease_ip, release_lease
 from .pve import ProxmoxClient, ProxmoxAPIError
 
 logger = logging.getLogger("apps.provisioning.tasks")
@@ -405,4 +406,242 @@ def provision_lifecycle_probe(self, source_vmid: int = 151, target_vmid: int = 9
         result["verdict"] = "SUCCESS"
     else:
         result["verdict"] = "PARTIAL" if not result.get("error") else "FAILED"
+    return result
+
+
+# ---------------------------------------------------------------------------
+# B2 Step 4 — SHARED-model provisioning bound to a BATCH
+# ---------------------------------------------------------------------------
+# The web layer only VALIDATEs + ENQUEUEs; THESE tasks are the only place a real
+# provision/deprovision happens, and they run in the Celery WORKER via the portal
+# token over verified TLS. clone->start bounded exactly as B2 Step 2; the leased
+# IP is RECORDED only (never applied as an ipconfig — that is B2.3).
+SHARED_SOURCE_VMID = 151
+
+
+@shared_task(bind=True)
+def provision_shared_instance(self, labinstance_id: int):
+    """Provision ONE shared VM for a (batch, lab_exercise) LabInstance:
+    capacity guard -> allocate VMID -> clone 151 -> start (bounded) -> lease IP
+    (recorded, NOT applied) -> record VMInstance -> status=running.
+    Any failure runs the error-path teardown (force stop -> destroy -> release)
+    leaving ZERO residue, and sets status=error."""
+    result: dict = {"labinstance_id": labinstance_id, "steps": {}}
+    steps = result["steps"]
+
+    try:
+        lab = (LabInstance.objects
+               .select_related("owner_batch", "lab_exercise")
+               .get(pk=labinstance_id))
+    except LabInstance.DoesNotExist:
+        result["error"] = f"LabInstance {labinstance_id} not found"
+        result["verdict"] = "FAILED"
+        return result
+
+    client = ProxmoxClient()
+    result["tls_verify"] = client.verify
+    batch_id = getattr(lab.owner_batch, "pk", None)
+    write_audit(None, "provision.request", target_type="LabInstance",
+                target_id=lab.pk, batch=batch_id,
+                lab_exercise=getattr(lab.lab_exercise, "pk", None),
+                mode=lab.provisioning_mode)
+
+    # --- capacity guard (authoritative; exclude self — already counted) -------
+    ok, reason = capacity_ok(client=client, exclude_labinstance_id=lab.pk)
+    steps["capacity"] = {"ok": ok, "reason": reason}
+    if not ok:
+        lab.status = LabInstance.Status.ERROR
+        lab.save(update_fields=["status"])
+        write_audit(None, "provision.rejected", target_type="LabInstance",
+                    target_id=lab.pk, reason=reason)
+        result["error"] = f"capacity: {reason}"
+        result["verdict"] = "REJECTED"
+        return result
+
+    vmid = None
+    lease = None
+    vm = None
+    clone_done = False
+    try:
+        vmid = allocate_vmid(client=client)
+        steps["allocated_vmid"] = vmid
+        name = f"b2-batch{batch_id}-{vmid}"
+        result["vmid"] = vmid
+
+        # --- clone 151 -> vmid (bounded task poll) --------------------------
+        write_audit(None, "provision.clone.start", target_type="qemu",
+                    target_id=vmid, source=SHARED_SOURCE_VMID,
+                    labinstance_id=lab.pk, name=name)
+        clone_upid = client.clone(SHARED_SOURCE_VMID, vmid, name,
+                                  full=True, pool=client.pool)
+        steps["clone_upid"] = clone_upid
+        cstat = client.wait_task(clone_upid, timeout=CAP_TASK)
+        steps["clone_task"] = {"status": cstat.get("status"),
+                               "exitstatus": cstat.get("exitstatus")}
+        clone_done = True
+
+        # --- START -> confirm genuinely RUNNING (bounded) -------------------
+        write_audit(None, "provision.start", target_type="qemu",
+                    target_id=vmid, labinstance_id=lab.pk)
+        start_upid = client.start(vmid)
+        steps["start_upid"] = start_upid
+        run_wait = client.wait_status(vmid, "running", timeout=CAP_START_RUNNING)
+        steps["start_wait"] = run_wait
+        if not run_wait.get("reached"):
+            raise ProxmoxAPIError(
+                f"start cap breached: {vmid} not 'running' within "
+                f"{CAP_START_RUNNING}s (last={run_wait.get('status')!r})")
+        steps["guest_ping"] = client.guest_ping(vmid)  # best-effort liveness
+
+        # --- lease IP (RECORD only — no ipconfig applied) + record VM -------
+        lease = lease_ip()
+        steps["leased_ip"] = str(lease.ip)
+        with transaction.atomic():
+            vm = VMInstance.objects.create(
+                lab_instance=lab, vmid=vmid, ip=lease, role=Role.TARGET,
+                proxmox_status="running", source_template_vmid=SHARED_SOURCE_VMID,
+                hostname=name)
+            lease.vm_instance = vm
+            lease.save(update_fields=["vm_instance"])
+            lab.status = LabInstance.Status.RUNNING
+            lab.save(update_fields=["status"])
+        steps["vm_instance_id"] = vm.pk
+        result["ip"] = str(lease.ip)
+
+        write_audit(None, "provision.ok", target_type="LabInstance",
+                    target_id=lab.pk, vmid=vmid, ip=str(lease.ip),
+                    waited_s=run_wait.get("waited_s"),
+                    ip_applied=False)  # leased/recorded only — B2.3 applies it
+        result["verdict"] = "SUCCESS"
+        return result
+
+    except Exception as exc:
+        logger.exception("provision_shared_instance failed; entering error-path teardown")
+        result["error"] = f"{type(exc).__name__}: {exc}"
+
+    # --- ERROR PATH: teardown -> ZERO residue --------------------------------
+    teardown: dict = {}
+    if vmid is not None and clone_done:
+        try:
+            still = client.get_status(vmid)
+            if still.get("exists"):
+                cur = (still.get("data") or {}).get("status")
+                if cur == "running":
+                    logger.warning("error-path: %s still running -> force stop", vmid)
+                    teardown["force_stop_upid"] = client.stop(vmid)
+                    teardown["force_stop_wait"] = client.wait_status(
+                        vmid, "stopped", timeout=CAP_FORCE_STOP)
+                write_audit(None, "provision.destroy.start", target_type="qemu",
+                            target_id=vmid, labinstance_id=lab.pk)
+                du = client.destroy(vmid, purge=True)
+                teardown["destroy_upid"] = du
+                dstat = client.wait_task(du, timeout=CAP_TASK)
+                teardown["destroy_task"] = {"status": dstat.get("status"),
+                                            "exitstatus": dstat.get("exitstatus")}
+            after = client.get_status(vmid)
+            teardown["gone"] = not after.get("exists")
+            teardown["after_http"] = after.get("http")
+        except Exception as texc:
+            teardown["destroy_error"] = f"{type(texc).__name__}: {texc}"
+            logger.exception("error-path destroy failed")
+
+    try:
+        with transaction.atomic():
+            if vm is not None and vm.pk is not None:
+                vm.delete()
+            if lease is not None:
+                release_lease(lease.pk)
+            lab.status = LabInstance.Status.ERROR
+            lab.save(update_fields=["status"])
+        teardown["db_cleaned"] = True
+    except Exception as texc:
+        teardown["db_error"] = f"{type(texc).__name__}: {texc}"
+        logger.exception("error-path db cleanup failed")
+
+    result["teardown"] = teardown
+    write_audit(None, "provision.error", target_type="LabInstance",
+                target_id=lab.pk, error=result.get("error"),
+                gone=teardown.get("gone"))
+    result["verdict"] = "FAILED"
+    return result
+
+
+@shared_task(bind=True)
+def deprovision_instance(self, labinstance_id: int):
+    """Tear down every VM of a LabInstance: graceful shutdown (bounded) -> force
+    fallback -> destroy -> release lease(s); set status=destroyed. Idempotent /
+    retry-safe (a VM already gone just releases its lease and deletes the row)."""
+    result: dict = {"labinstance_id": labinstance_id, "vms": []}
+
+    try:
+        lab = LabInstance.objects.get(pk=labinstance_id)
+    except LabInstance.DoesNotExist:
+        result["error"] = f"LabInstance {labinstance_id} not found"
+        result["verdict"] = "FAILED"
+        return result
+
+    client = ProxmoxClient()
+    result["tls_verify"] = client.verify
+    write_audit(None, "deprovision.start", target_type="LabInstance",
+                target_id=lab.pk)
+
+    all_gone = True
+    for vm in list(lab.vms.all()):
+        v: dict = {"vm_instance_id": vm.pk, "vmid": vm.vmid}
+        try:
+            if vm.vmid is not None:
+                st = client.get_status(vm.vmid)
+                if st.get("exists"):
+                    cur = (st.get("data") or {}).get("status")
+                    if cur == "running":
+                        client.shutdown(vm.vmid)
+                        grace = client.wait_status(vm.vmid, "stopped",
+                                                   timeout=CAP_GRACE_STOP)
+                        v["graceful_stop_wait"] = grace
+                        if grace.get("reached"):
+                            v["stop_path"] = "graceful"
+                        else:
+                            logger.warning("deprovision: %s graceful cap breached -> force",
+                                           vm.vmid)
+                            client.stop(vm.vmid)
+                            v["forced_stop_wait"] = client.wait_status(
+                                vm.vmid, "stopped", timeout=CAP_FORCE_STOP)
+                            v["stop_path"] = "forced"
+                    write_audit(None, "deprovision.destroy.start", target_type="qemu",
+                                target_id=vm.vmid, labinstance_id=lab.pk)
+                    du = client.destroy(vm.vmid, purge=True)
+                    v["destroy_upid"] = du
+                    dstat = client.wait_task(du, timeout=CAP_TASK)
+                    v["destroy_task"] = {"status": dstat.get("status"),
+                                         "exitstatus": dstat.get("exitstatus")}
+                after = client.get_status(vm.vmid)
+                v["gone"] = not after.get("exists")
+                all_gone = all_gone and v["gone"]
+
+            # release lease(s) + delete the VM row (even if it had no vmid)
+            with transaction.atomic():
+                lease_pks = list(
+                    IPLease.objects.filter(vm_instance=vm).values_list("pk", flat=True)
+                )
+                for pk in lease_pks:
+                    release_lease(pk)
+                vm.delete()
+            v["released_leases"] = lease_pks
+        except Exception as exc:
+            v["error"] = f"{type(exc).__name__}: {exc}"
+            all_gone = False
+            logger.exception("deprovision of vmid %s failed", vm.vmid)
+        result["vms"].append(v)
+
+    if all_gone:
+        lab.status = LabInstance.Status.DESTROYED
+        lab.save(update_fields=["status"])
+        write_audit(None, "deprovision.ok", target_type="LabInstance",
+                    target_id=lab.pk)
+        result["verdict"] = "SUCCESS"
+    else:
+        write_audit(None, "deprovision.partial", target_type="LabInstance",
+                    target_id=lab.pk)
+        result["verdict"] = "PARTIAL"
+    result["status"] = lab.status
     return result

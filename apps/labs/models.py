@@ -41,6 +41,7 @@ class LabInstance(models.Model):
         STOPPED = "stopped", "Stopped"
         EXPIRED = "expired", "Expired"
         ERROR = "error", "Error"
+        DESTROYED = "destroyed", "Destroyed"
 
     class ProvisioningMode(models.TextChoices):
         SHARED = "shared", "Shared"
