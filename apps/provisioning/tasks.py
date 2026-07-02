@@ -28,7 +28,13 @@ from apps.audit.services import write_audit
 from apps.curriculum.models import Course, LabExercise, Module
 from apps.labs.models import IPLease, LabInstance, LabTemplate, Role, VMInstance
 
-from .allocation import allocate_vmid, capacity_ok, lease_ip, release_lease
+from .allocation import (
+    allocate_and_reserve_vmid,
+    capacity_ok,
+    lease_ip,
+    release_lease,
+    release_reservation,
+)
 from .pve import ProxmoxClient, ProxmoxAPIError
 
 logger = logging.getLogger("apps.provisioning.tasks")
@@ -213,7 +219,11 @@ LIFECYCLE_NAME = "b2-lifecycle-9000"
 CAP_START_RUNNING = 120   # start -> running
 CAP_GRACE_STOP = 90       # graceful shutdown -> stopped
 CAP_FORCE_STOP = 30       # force stop -> stopped
-CAP_TASK = 300            # clone/destroy task poll cap
+CAP_TASK = 300            # destroy task poll cap
+# Full clones on shared storage slow down under PARALLEL provisioning (I/O
+# contention roughly doubles clone time), so the clone wait cap is larger than
+# the destroy cap. Still bounded — a breach fails cleanly into error-path reap.
+CAP_CLONE = 600           # clone task poll cap (parallel-provision aware)
 
 
 @shared_task(bind=True)
@@ -421,11 +431,18 @@ SHARED_SOURCE_VMID = 151
 
 @shared_task(bind=True)
 def provision_shared_instance(self, labinstance_id: int):
-    """Provision ONE shared VM for a (batch, lab_exercise) LabInstance:
-    capacity guard -> allocate VMID -> clone 151 -> start (bounded) -> lease IP
-    (recorded, NOT applied) -> record VMInstance -> status=running.
-    Any failure runs the error-path teardown (force stop -> destroy -> release)
-    leaving ZERO residue, and sets status=error."""
+    """Provision ONE shared VM for a (batch, lab_exercise) LabInstance, ATOMIC
+    reserve-then-clone (B2 Step 4a):
+
+      capacity guard -> RESERVE vmid (unique-arbitrated) + RESERVE ip (skip_locked)
+      -> clone 151 INTO the reserved vmid -> start (bounded) -> record running.
+
+    Concurrency-safe: two parallel tasks can never reserve the same vmid or ip.
+    Retry-safe: if the lab already has a running VM this is a no-op; a failure
+    runs the error-path teardown (force stop -> destroy -> release reservation +
+    lease) leaving ZERO residue and sets status=error, so a retry starts clean.
+    The leased IP is RECORDED only (never applied as an ipconfig — that is B2.3).
+    """
     result: dict = {"labinstance_id": labinstance_id, "steps": {}}
     steps = result["steps"]
 
@@ -436,6 +453,15 @@ def provision_shared_instance(self, labinstance_id: int):
     except LabInstance.DoesNotExist:
         result["error"] = f"LabInstance {labinstance_id} not found"
         result["verdict"] = "FAILED"
+        return result
+
+    # --- IDEMPOTENCY: a retry of an already-provisioned lab is a NO-OP --------
+    existing_running = lab.vms.filter(proxmox_status="running").first()
+    if existing_running is not None:
+        result["vmid"] = existing_running.vmid
+        result["ip"] = str(existing_running.ip.ip) if existing_running.ip_id else None
+        result["idempotent_noop"] = True
+        result["verdict"] = "SUCCESS"
         return result
 
     client = ProxmoxClient()
@@ -458,24 +484,36 @@ def provision_shared_instance(self, labinstance_id: int):
         result["verdict"] = "REJECTED"
         return result
 
-    vmid = None
-    lease = None
     vm = None
+    lease = None
+    vmid = None
     clone_done = False
     try:
-        vmid = allocate_vmid(client=client)
-        steps["allocated_vmid"] = vmid
-        name = f"b2-batch{batch_id}-{vmid}"
+        # --- RESERVE vmid (unique-arbitrated) + ip (skip_locked) FIRST -------
+        vm = allocate_and_reserve_vmid(lab, client=client)
+        vmid = vm.vmid
         result["vmid"] = vmid
+        steps["reserved_vmid"] = vmid
+        lease = lease_ip()
+        steps["reserved_ip"] = str(lease.ip)
+        name = f"b2-batch{batch_id}-{vmid}"
+        with transaction.atomic():
+            vm.ip = lease
+            vm.hostname = name
+            vm.save(update_fields=["ip", "hostname"])
+            lease.vm_instance = vm
+            lease.save(update_fields=["vm_instance"])
+        write_audit(None, "provision.reserve", target_type="qemu", target_id=vmid,
+                    labinstance_id=lab.pk, ip=str(lease.ip))
 
-        # --- clone 151 -> vmid (bounded task poll) --------------------------
+        # --- clone 151 -> the RESERVED vmid (bounded task poll) -------------
         write_audit(None, "provision.clone.start", target_type="qemu",
                     target_id=vmid, source=SHARED_SOURCE_VMID,
                     labinstance_id=lab.pk, name=name)
         clone_upid = client.clone(SHARED_SOURCE_VMID, vmid, name,
                                   full=True, pool=client.pool)
         steps["clone_upid"] = clone_upid
-        cstat = client.wait_task(clone_upid, timeout=CAP_TASK)
+        cstat = client.wait_task(clone_upid, timeout=CAP_CLONE)
         steps["clone_task"] = {"status": cstat.get("status"),
                                "exitstatus": cstat.get("exitstatus")}
         clone_done = True
@@ -493,16 +531,10 @@ def provision_shared_instance(self, labinstance_id: int):
                 f"{CAP_START_RUNNING}s (last={run_wait.get('status')!r})")
         steps["guest_ping"] = client.guest_ping(vmid)  # best-effort liveness
 
-        # --- lease IP (RECORD only — no ipconfig applied) + record VM -------
-        lease = lease_ip()
-        steps["leased_ip"] = str(lease.ip)
+        # --- record RUNNING (VM row already exists from the reservation) ----
         with transaction.atomic():
-            vm = VMInstance.objects.create(
-                lab_instance=lab, vmid=vmid, ip=lease, role=Role.TARGET,
-                proxmox_status="running", source_template_vmid=SHARED_SOURCE_VMID,
-                hostname=name)
-            lease.vm_instance = vm
-            lease.save(update_fields=["vm_instance"])
+            vm.proxmox_status = "running"
+            vm.save(update_fields=["proxmox_status"])
             lab.status = LabInstance.Status.RUNNING
             lab.save(update_fields=["status"])
         steps["vm_instance_id"] = vm.pk
@@ -520,8 +552,19 @@ def provision_shared_instance(self, labinstance_id: int):
         result["error"] = f"{type(exc).__name__}: {exc}"
 
     # --- ERROR PATH: teardown -> ZERO residue --------------------------------
+    # Because we RESERVED the vmid up-front, the error path knows exactly which
+    # VM to reap even if the failure was a clone TIMEOUT (clone_done False but the
+    # clone may still have created the VM). So we reap the reserved vmid whenever
+    # it is set — not only when clone_done. If a still-running clone holds a lock,
+    # the destroy fails cleanly and is captured (reaper follow-up covers that).
     teardown: dict = {}
-    if vmid is not None and clone_done:
+    if vmid is not None:
+        # let an in-flight clone settle so the VM isn't lock-held during destroy
+        if not clone_done and steps.get("clone_upid"):
+            try:
+                client.wait_task(steps["clone_upid"], timeout=CAP_CLONE)
+            except Exception:  # noqa: BLE001 — best-effort; destroy handles the rest
+                pass
         try:
             still = client.get_status(vmid)
             if still.get("exists"):
@@ -545,14 +588,11 @@ def provision_shared_instance(self, labinstance_id: int):
             teardown["destroy_error"] = f"{type(texc).__name__}: {texc}"
             logger.exception("error-path destroy failed")
 
+    # release the reservation (frees vmid + its lease) so a retry starts clean
     try:
-        with transaction.atomic():
-            if vm is not None and vm.pk is not None:
-                vm.delete()
-            if lease is not None:
-                release_lease(lease.pk)
-            lab.status = LabInstance.Status.ERROR
-            lab.save(update_fields=["status"])
+        release_reservation(vm)
+        lab.status = LabInstance.Status.ERROR
+        lab.save(update_fields=["status"])
         teardown["db_cleaned"] = True
     except Exception as texc:
         teardown["db_error"] = f"{type(texc).__name__}: {texc}"

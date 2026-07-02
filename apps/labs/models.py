@@ -105,7 +105,12 @@ class VMInstance(models.Model):
     lab_instance = models.ForeignKey(
         LabInstance, on_delete=models.CASCADE, related_name="vms"
     )
-    vmid = models.IntegerField(null=True, blank=True)
+    # UNIQUE so the DB itself arbitrates VMID allocation: two concurrent
+    # provisions inserting a reservation row for the same 9000-range vmid cannot
+    # both succeed (one hits IntegrityError and retries the next free vmid).
+    # Nullable is fine — Postgres treats NULLs as distinct, so unassigned rows
+    # do not collide.
+    vmid = models.IntegerField(null=True, blank=True, unique=True)
     hostname = models.CharField(max_length=255, null=True, blank=True)
     ip = models.ForeignKey(
         IPLease, on_delete=models.SET_NULL, null=True, blank=True,

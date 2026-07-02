@@ -1,30 +1,35 @@
 """VMID + IP allocation and the capacity guard for shared-model provisioning.
 
-Split by trust boundary so the WEB request never has to touch Proxmox:
+ATOMIC reserve-then-clone (B2 Step 4a). Allocation is arbitrated by the DATABASE
+so two concurrent (or retried) provisions can never claim the same VMID or IP:
 
-  * capacity_precheck_db()  -- DB-only. Safe to call from a web request (validate
-                               + enqueue). Checks the concurrency cap, the free-IP
-                               pool, and DB-recorded 9000-range usage.
-  * capacity_ok(client)     -- the authoritative check, run in the WORKER. Adds a
-                               live Proxmox enumeration of the 9000-range.
-  * allocate_vmid(client)   -- lowest free VMID in 9000..9099 (live Proxmox OR a
-                               DB VMInstance record counts as taken).
-  * lease_ip()              -- atomically flip one free IPLease free->leased.
+  * allocate_and_reserve_vmid(lab)  -- INSERTs a reservation row (VMInstance with
+      a concrete 9000-range vmid). VMInstance.vmid is UNIQUE, so a colliding
+      concurrent insert raises IntegrityError; we catch it and retry the next
+      free vmid. The committed reservation is what blocks another task — a bare
+      "lowest free number" (check-then-act) had a race window between the read
+      and the clone.
+  * lease_ip()  -- claims a free IPLease under select_for_update(skip_locked=True)
+      so two tasks lock+take DIFFERENT rows instead of racing for the same one.
+  * capacity_precheck_db()  -- DB-only (web-safe). capacity_ok(client) -- worker
+      authoritative (adds a live Proxmox 9000-range enumeration).
 
-allocate_vmid / capacity_ok issue a Proxmox read, so they are WORKER-only.
+allocate_and_reserve_vmid / capacity_ok issue a Proxmox read → WORKER-only.
 """
 from __future__ import annotations
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.labs.models import IPLease, LabInstance, VMInstance
+from apps.labs.models import IPLease, LabInstance, Role, VMInstance
 
 from .pve import ProxmoxClient, TARGET_VMID_MAX, TARGET_VMID_MIN
 
 DEFAULT_MAX_CONCURRENT = 10
+SHARED_SOURCE_VMID = 151
 _VMID_SLOTS = TARGET_VMID_MAX - TARGET_VMID_MIN + 1
+RESERVED = "reserved"
 
 
 class CapacityError(RuntimeError):
@@ -36,7 +41,7 @@ def _max_concurrent() -> int:
 
 
 def _db_target_vmids() -> set[int]:
-    """9000-range VMIDs recorded on live (not-yet-destroyed) VMInstance rows."""
+    """9000-range VMIDs already reserved/recorded on VMInstance rows."""
     return set(
         VMInstance.objects.filter(
             vmid__gte=TARGET_VMID_MIN, vmid__lte=TARGET_VMID_MAX
@@ -49,7 +54,6 @@ def _live_target_vmids(client: ProxmoxClient) -> set[int]:
 
 
 def active_instance_count(exclude_labinstance_id=None) -> int:
-    """Instances that hold (or are about to hold) resources."""
     qs = LabInstance.objects.filter(
         status__in=(LabInstance.Status.PENDING, LabInstance.Status.RUNNING)
     )
@@ -84,26 +88,53 @@ def capacity_ok(client=None, exclude_labinstance_id=None):
     return True, "ok"
 
 
-def allocate_vmid(client=None) -> int:
-    """Lowest free VMID in 9000..9099. A VMID is taken if it exists in Proxmox
-    (any state) OR is recorded on a live VMInstance row. Raises CapacityError."""
+def allocate_and_reserve_vmid(lab, client=None, *, role=Role.TARGET, max_attempts=None):
+    """Atomically reserve the lowest free VMID in 9000..9099 for `lab` by
+    INSERTing a VMInstance reservation row (proxmox_status='reserved'). Returns
+    the reserved VMInstance. The UNIQUE(vmid) constraint arbitrates: a colliding
+    concurrent insert raises IntegrityError, which we catch and retry with the
+    next free vmid. Raises CapacityError when the range is exhausted.
+
+    The caller clones INTO the reserved vmid — never allocates a bare number.
+    """
     client = client or ProxmoxClient()
-    taken = _live_target_vmids(client) | _db_target_vmids()
-    for vmid in range(TARGET_VMID_MIN, TARGET_VMID_MAX + 1):
-        if vmid not in taken:
-            return vmid
+    live = _live_target_vmids(client)  # one Proxmox enumeration per call
+    attempts = 0
+    cap = max_attempts or _VMID_SLOTS
+    while attempts < cap:
+        attempts += 1
+        taken = live | _db_target_vmids()  # re-read committed reservations
+        vmid = next(
+            (c for c in range(TARGET_VMID_MIN, TARGET_VMID_MAX + 1) if c not in taken),
+            None,
+        )
+        if vmid is None:
+            raise CapacityError(f"no free VMID in {TARGET_VMID_MIN}..{TARGET_VMID_MAX}")
+        try:
+            with transaction.atomic():
+                return VMInstance.objects.create(
+                    lab_instance=lab,
+                    vmid=vmid,
+                    role=role,
+                    proxmox_status=RESERVED,
+                    source_template_vmid=SHARED_SOURCE_VMID,
+                )
+        except IntegrityError:
+            # Another task committed this vmid first; retry the next free one.
+            continue
     raise CapacityError(
-        f"no free VMID in {TARGET_VMID_MIN}..{TARGET_VMID_MAX} ({len(taken)} in use)"
+        f"could not reserve a VMID after {cap} attempts (contention/exhaustion)"
     )
 
 
 def lease_ip() -> IPLease:
-    """Atomically take one free IPLease (free->leased) under a row lock. The
-    caller attaches vm_instance once the VMInstance row exists. RECORD only —
-    this does NOT apply an ipconfig to any VM (that is B2.3)."""
+    """Atomically claim one free IPLease. select_for_update(skip_locked=True)
+    makes two concurrent tasks lock+take DIFFERENT rows (the second skips the
+    row the first locked) instead of racing for the same address. RECORD only —
+    never applies an ipconfig to a VM (that is B2.3)."""
     with transaction.atomic():
         lease = (
-            IPLease.objects.select_for_update()
+            IPLease.objects.select_for_update(skip_locked=True)
             .filter(state=IPLease.State.FREE)
             .order_by("ip")
             .first()
@@ -130,3 +161,14 @@ def release_lease(lease_pk) -> None:
         lease.save(
             update_fields=["state", "vm_instance", "released_at", "leased_at"]
         )
+
+
+def release_reservation(vm) -> None:
+    """Release a VMInstance reservation: free its lease(s) and delete the row.
+    Idempotent / retry-safe (frees the reserved vmid for reuse)."""
+    if vm is None or vm.pk is None:
+        return
+    with transaction.atomic():
+        for pk in IPLease.objects.filter(vm_instance=vm).values_list("pk", flat=True):
+            release_lease(pk)
+        vm.delete()
