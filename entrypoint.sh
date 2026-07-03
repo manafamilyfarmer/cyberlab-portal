@@ -33,10 +33,31 @@ fi
 # (files themselves are written 0600 by the upload view). Runs as root before
 # dropping privileges so the daemon-mounted volume gets the right ownership.
 SUBMISSIONS_DIR="${SUBMISSIONS_DIR:-/var/cyberlab-submissions}"
+
+# Ensure the audit JSON-stream dir/file exist for the structured SIEM sink
+# (Wazuh part 1). Dir app-user-owned 0750; the JSONL file 0640 (NOT world-
+# readable). This file is the SIEM ingestion source and is never web-served.
+AUDIT_LOG_DIR="${AUDIT_LOG_DIR:-/var/cyberlab-portal-logs}"
+AUDIT_LOG_PATH="${AUDIT_LOG_PATH:-$AUDIT_LOG_DIR/audit.jsonl}"
+
 if [ "$(id -u)" = "0" ]; then
     mkdir -p "$SUBMISSIONS_DIR"
     chown app:app "$SUBMISSIONS_DIR"
     chmod 700 "$SUBMISSIONS_DIR"
+
+    mkdir -p "$AUDIT_LOG_DIR"
+    chown app:app "$AUDIT_LOG_DIR"
+    chmod 750 "$AUDIT_LOG_DIR"
+    if [ ! -e "$AUDIT_LOG_PATH" ]; then
+        : > "$AUDIT_LOG_PATH"
+    fi
+    chown app:app "$AUDIT_LOG_PATH"
+    chmod 640 "$AUDIT_LOG_PATH"
+
+    # 0027 so any file the app creates later (e.g. a rotated audit.jsonl.1) is at
+    # most 0640 — never world-readable. The submissions view still chmods 0600.
+    umask 0027
     exec gosu app "$@"
 fi
+umask 0027
 exec "$@"

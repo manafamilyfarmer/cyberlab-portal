@@ -188,3 +188,20 @@ SUBMISSION_ALLOWED_TYPES = [
 # ClamAV clamd (internal compose network; INSTREAM scan, no shared volume).
 CLAMAV_HOST = os.environ.get("CLAMAV_HOST", "clamav")
 CLAMAV_PORT = int(os.environ.get("CLAMAV_PORT", "3310"))
+
+# --- Audit JSON stream (Wazuh part 1: emit side) ---
+# Every write_audit() ALSO emits one compact JSON line here, IN ADDITION to the
+# AuditLog DB row. This JSONL file is the SIEM ingestion source (a Wazuh agent /
+# syslog / API tails it). It lives on a dedicated volume OUTSIDE the app tree and
+# is NEVER web-served. The entrypoint creates the dir (app-user-owned, 0750) and
+# the file (0640, not world-readable) before dropping privileges. A logging
+# failure here must NEVER break the audited action (write_audit is log-and-continue).
+AUDIT_LOG_DIR = os.environ.get("AUDIT_LOG_DIR", "/var/cyberlab-portal-logs")
+AUDIT_LOG_PATH = os.environ.get(
+    "AUDIT_LOG_PATH", os.path.join(AUDIT_LOG_DIR, "audit.jsonl")
+)
+# Size-capped rotation so the stream can never fill the disk. Rotation across the
+# gunicorn + celery worker/beat processes is best-effort (append-mode, size cap);
+# see apps.audit.emit for the justification.
+AUDIT_LOG_MAX_BYTES = int(os.environ.get("AUDIT_LOG_MAX_BYTES", str(50 * 1024 * 1024)))
+AUDIT_LOG_BACKUPS = int(os.environ.get("AUDIT_LOG_BACKUPS", "5"))

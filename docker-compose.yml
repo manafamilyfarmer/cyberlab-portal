@@ -12,6 +12,8 @@ services:
       # Proxmox API TLS cert. Read-only; the app reads it via PORTAL_PVE_CA_BUNDLE.
       - /opt/cyberlab-portal/certs:/run/portal-certs:ro
       - submissions:/var/cyberlab-submissions
+      # Structured audit JSON stream (Wazuh part 1). NOT web-served; the SIEM tails it.
+      - audit_logs:/var/cyberlab-portal-logs
     ports:
       # Bind to VM114's internal interface only — never 0.0.0.0 / public.
       - "192.168.100.92:8000:8000"
@@ -30,6 +32,7 @@ services:
       - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
       - /opt/cyberlab-portal/certs:/run/portal-certs:ro
       - submissions:/var/cyberlab-submissions
+      - audit_logs:/var/cyberlab-portal-logs
     extra_hosts:
       - "proxmox.cyberlab:192.168.100.1"
     depends_on:
@@ -42,6 +45,7 @@ services:
     command: ["celery", "-A", "config", "beat", "-l", "info"]
     volumes:
       - /opt/cyberlab-portal/secrets:/run/portal-secrets:ro
+      - audit_logs:/var/cyberlab-portal-logs
     depends_on:
       - redis
     restart: unless-stopped
@@ -62,3 +66,6 @@ services:
 volumes:
   submissions:
   clamav_db:
+  # Audit JSON stream (Wazuh part 1). Dedicated volume OUTSIDE the app tree and
+  # NOT web-served; entrypoint owns it app:app and creates the 0640 JSONL file.
+  audit_logs:
