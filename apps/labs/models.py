@@ -120,6 +120,9 @@ class VMInstance(models.Model):
     proxmox_status = models.CharField(max_length=32, null=True, blank=True)
     source_template_vmid = models.IntegerField(null=True, blank=True)
     mirrored = models.BooleanField(default=False)
+    # True once cloud-init has applied the leased IP inside the guest (B2.3),
+    # confirmed via the guest agent. False for a recorded-but-not-applied lease.
+    ip_applied = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("lab_instance", "role")

@@ -19,8 +19,11 @@ row created here is deleted again during teardown.
 from __future__ import annotations
 
 import logging
+import socket
+import time
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -424,9 +427,37 @@ def provision_lifecycle_probe(self, source_vmid: int = 151, target_vmid: int = 9
 # ---------------------------------------------------------------------------
 # The web layer only VALIDATEs + ENQUEUEs; THESE tasks are the only place a real
 # provision/deprovision happens, and they run in the Celery WORKER via the portal
-# token over verified TLS. clone->start bounded exactly as B2 Step 2; the leased
-# IP is RECORDED only (never applied as an ipconfig — that is B2.3).
-SHARED_SOURCE_VMID = 151
+# token over verified TLS. B2.3: the source is now the cloud-init template (153)
+# and the leased IP is APPLIED via ipconfig0 + confirmed inside the guest.
+# cloud-init first boot on a full clone is slow: the qemu-guest-agent only
+# becomes answerable ~220s after the VM reports 'running' (measured on 153), so
+# the apply-confirm cap is generous. Still bounded — a breach fails cleanly into
+# the error-path reap (zero residue).
+CAP_IP_APPLIED = 300   # poll agent until leased IP appears inside the guest
+CAP_REACHABLE = 30     # worker TCP-connect to leased_ip:22
+
+
+def _source_template() -> int:
+    return int(getattr(settings, "PROVISION_SOURCE_TEMPLATE", 153))
+
+
+def _tcp_reachable(ip, port=22, *, cap=CAP_REACHABLE, interval=2.0):
+    """Poll a TCP connect to ip:port until it succeeds or the cap elapses.
+    Preferred over ICMP — the worker container often lacks CAP_NET_RAW for ping.
+    Returns {reachable, waited_s, port}."""
+    start = time.monotonic()
+    deadline = start + cap
+    last_err = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((str(ip), port), timeout=3):
+                return {"reachable": True, "port": port,
+                        "waited_s": round(time.monotonic() - start, 1)}
+        except OSError as exc:
+            last_err = str(exc)
+            time.sleep(interval)
+    return {"reachable": False, "port": port, "error": last_err,
+            "waited_s": round(time.monotonic() - start, 1)}
 
 
 @shared_task(bind=True)
@@ -506,17 +537,26 @@ def provision_shared_instance(self, labinstance_id: int):
         write_audit(None, "provision.reserve", target_type="qemu", target_id=vmid,
                     labinstance_id=lab.pk, ip=str(lease.ip))
 
-        # --- clone 151 -> the RESERVED vmid (bounded task poll) -------------
+        # --- clone 153 -> the RESERVED vmid (bounded task poll) -------------
+        source_vmid = _source_template()
+        leased_ip = str(lease.ip)
         write_audit(None, "provision.clone.start", target_type="qemu",
-                    target_id=vmid, source=SHARED_SOURCE_VMID,
+                    target_id=vmid, source=source_vmid,
                     labinstance_id=lab.pk, name=name)
-        clone_upid = client.clone(SHARED_SOURCE_VMID, vmid, name,
+        clone_upid = client.clone(source_vmid, vmid, name,
                                   full=True, pool=client.pool)
         steps["clone_upid"] = clone_upid
         cstat = client.wait_task(clone_upid, timeout=CAP_CLONE)
         steps["clone_task"] = {"status": cstat.get("status"),
                                "exitstatus": cstat.get("exitstatus")}
         clone_done = True
+
+        # --- APPLY the leased IP via cloud-init BEFORE start ----------------
+        gw = getattr(settings, "PROVISION_IP_GATEWAY", "192.168.100.1")
+        cidr = int(getattr(settings, "PROVISION_IP_CIDR", 24))
+        steps["set_ipconfig"] = client.set_ipconfig(vmid, leased_ip, gw=gw, cidr=cidr)
+        write_audit(None, "provision.ip_set", target_type="qemu", target_id=vmid,
+                    labinstance_id=lab.pk, ipconfig=steps["set_ipconfig"]["ipconfig"])
 
         # --- START -> confirm genuinely RUNNING (bounded) -------------------
         write_audit(None, "provision.start", target_type="qemu",
@@ -529,21 +569,58 @@ def provision_shared_instance(self, labinstance_id: int):
             raise ProxmoxAPIError(
                 f"start cap breached: {vmid} not 'running' within "
                 f"{CAP_START_RUNNING}s (last={run_wait.get('status')!r})")
-        steps["guest_ping"] = client.guest_ping(vmid)  # best-effort liveness
 
-        # --- record RUNNING (VM row already exists from the reservation) ----
+        # --- APPLY-CONFIRM: poll the guest agent until the leased IP appears
+        #     on an interface INSIDE the guest (cloud-init first boot is slow) --
+        apply_start = time.monotonic()
+        apply_deadline = apply_start + CAP_IP_APPLIED
+        ip_in_guest = False
+        last_ifaces = None
+        while time.monotonic() < apply_deadline:
+            ifaces = client.agent_get_interfaces(vmid)
+            last_ifaces = ifaces
+            if ifaces.get("ok") and leased_ip in ifaces.get("ips", []):
+                ip_in_guest = True
+                break
+            time.sleep(3)
+        steps["apply_confirm"] = {
+            "ip_in_guest": ip_in_guest,
+            "agent_ips": (last_ifaces or {}).get("ips", []),
+            "waited_s": round(time.monotonic() - apply_start, 1),
+        }
+        if not ip_in_guest:
+            raise ProxmoxAPIError(
+                f"IP-apply not confirmed: leased {leased_ip} not present on a "
+                f"guest interface within {CAP_IP_APPLIED}s "
+                f"(agent said {(last_ifaces or {}).get('ips')})")
+        write_audit(None, "provision.ip_applied", target_type="qemu", target_id=vmid,
+                    labinstance_id=lab.pk, ip=leased_ip,
+                    waited_s=steps["apply_confirm"]["waited_s"])
+
+        # --- REACHABILITY: worker TCP-connect to leased_ip:22 (openssh) -----
+        reach = _tcp_reachable(leased_ip, 22)
+        steps["reachable"] = reach
+        write_audit(None, "provision.reachable", target_type="qemu", target_id=vmid,
+                    labinstance_id=lab.pk, ip=leased_ip,
+                    reachable=reach.get("reachable"), port=22,
+                    waited_s=reach.get("waited_s"))
+
+        # --- record RUNNING + ip_applied (VM row exists from the reservation)
         with transaction.atomic():
             vm.proxmox_status = "running"
-            vm.save(update_fields=["proxmox_status"])
+            vm.ip_applied = True
+            vm.save(update_fields=["proxmox_status", "ip_applied"])
             lab.status = LabInstance.Status.RUNNING
             lab.save(update_fields=["status"])
         steps["vm_instance_id"] = vm.pk
-        result["ip"] = str(lease.ip)
+        result["ip"] = leased_ip
+        result["ip_applied"] = True
+        result["reachable"] = reach.get("reachable")
 
         write_audit(None, "provision.ok", target_type="LabInstance",
-                    target_id=lab.pk, vmid=vmid, ip=str(lease.ip),
-                    waited_s=run_wait.get("waited_s"),
-                    ip_applied=False)  # leased/recorded only — B2.3 applies it
+                    target_id=lab.pk, vmid=vmid, ip=leased_ip,
+                    source=source_vmid, waited_s=run_wait.get("waited_s"),
+                    ip_applied=True, reachable=reach.get("reachable"))
         result["verdict"] = "SUCCESS"
         return result
 
@@ -647,6 +724,9 @@ def deprovision_instance(self, labinstance_id: int):
                             v["forced_stop_wait"] = client.wait_status(
                                 vm.vmid, "stopped", timeout=CAP_FORCE_STOP)
                             v["stop_path"] = "forced"
+                        write_audit(None, "deprovision.stopped", target_type="qemu",
+                                    target_id=vm.vmid, labinstance_id=lab.pk,
+                                    stop_path=v.get("stop_path"))
                     write_audit(None, "deprovision.destroy.start", target_type="qemu",
                                 target_id=vm.vmid, labinstance_id=lab.pk)
                     du = client.destroy(vm.vmid, purge=True)

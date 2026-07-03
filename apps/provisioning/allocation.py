@@ -27,9 +27,12 @@ from apps.labs.models import IPLease, LabInstance, Role, VMInstance
 from .pve import ProxmoxClient, TARGET_VMID_MAX, TARGET_VMID_MIN
 
 DEFAULT_MAX_CONCURRENT = 10
-SHARED_SOURCE_VMID = 151
 _VMID_SLOTS = TARGET_VMID_MAX - TARGET_VMID_MIN + 1
 RESERVED = "reserved"
+
+
+def _source_template() -> int:
+    return int(getattr(settings, "PROVISION_SOURCE_TEMPLATE", 153))
 
 
 class CapacityError(RuntimeError):
@@ -117,7 +120,7 @@ def allocate_and_reserve_vmid(lab, client=None, *, role=Role.TARGET, max_attempt
                     vmid=vmid,
                     role=role,
                     proxmox_status=RESERVED,
-                    source_template_vmid=SHARED_SOURCE_VMID,
+                    source_template_vmid=_source_template(),
                 )
         except IntegrityError:
             # Another task committed this vmid first; retry the next free one.

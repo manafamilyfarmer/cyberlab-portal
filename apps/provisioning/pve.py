@@ -28,7 +28,7 @@ logger = logging.getLogger("apps.provisioning.pve")
 # ---------------------------------------------------------------------------
 # Guard configuration (in-code, not env-driven — cannot be relaxed at runtime)
 # ---------------------------------------------------------------------------
-CLONE_SOURCE_ALLOWLIST = frozenset({151, 152})
+CLONE_SOURCE_ALLOWLIST = frozenset({151, 152, 153})
 TARGET_VMID_MIN = 9000
 TARGET_VMID_MAX = 9099
 NEVER_TOUCH = frozenset({106, 109, 110})
@@ -320,6 +320,49 @@ class ProxmoxClient:
             "available": resp.status_code == 200,
             "data": (self._json(resp) or {}).get("data"),
         }
+
+    def set_ipconfig(self, vmid, ip, gw="192.168.100.1", cidr=24, *, index=0):
+        """Apply a static IP to a clone via cloud-init (ipconfig<index>). Guarded
+        to the 9000-range. Set on the STOPPED clone before start; cloud-init
+        consumes it at first boot. Synchronous config PUT (no UPID)."""
+        vmid = self._guard(vmid, "set_ipconfig")
+        value = f"ip={ip}/{cidr},gw={gw}"
+        resp = self._request(
+            "PUT", f"/nodes/{self.node}/qemu/{vmid}/config",
+            data={f"ipconfig{index}": value},
+        )
+        if resp.status_code not in (200, 201):
+            raise ProxmoxAPIError(
+                f"set_ipconfig {vmid} failed HTTP {resp.status_code}: "
+                f"{resp.text[:300]}"
+            )
+        return {"http": resp.status_code, "ipconfig": value}
+
+    def agent_get_interfaces(self, vmid):
+        """GET the guest agent's network interfaces. Never raises — returns
+        {ok, available, ips:[...], error?}. Tolerates 'QEMU guest agent is not
+        running' while cloud-init + the agent come up on first boot (poll with
+        backoff)."""
+        vmid = self._guard(vmid, "agent_ifaces")
+        try:
+            resp = self._request(
+                "GET",
+                f"/nodes/{self.node}/qemu/{vmid}/agent/network-get-interfaces",
+            )
+        except ProxmoxAPIError as exc:
+            return {"ok": False, "available": False, "error": str(exc)[:200], "ips": []}
+        if resp.status_code != 200:
+            return {"ok": False, "available": False, "http": resp.status_code,
+                    "error": (resp.text or "")[:200], "ips": []}
+        data = (self._json(resp) or {}).get("data") or {}
+        result = data.get("result", data) if isinstance(data, dict) else data
+        ips = []
+        for iface in (result or []):
+            for addr in (iface.get("ip-addresses") or []):
+                ip_addr = addr.get("ip-address")
+                if ip_addr:
+                    ips.append(ip_addr)
+        return {"ok": True, "available": True, "http": 200, "ips": ips}
 
     def destroy(self, vmid, *, purge=True):
         vmid = self._guard(vmid, "destroy")

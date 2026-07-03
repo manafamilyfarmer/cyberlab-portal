@@ -148,6 +148,14 @@ CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6
 # in the web DB pre-check).
 PROVISION_MAX_CONCURRENT = int(os.environ.get("PROVISION_MAX_CONCURRENT", "10"))
 
+# Shared-model source template. 153 = cloud-init-ready Ubuntu 24.04 (qemu-guest-
+# agent baked in, ACPI works) — the leased IP is APPLIED via cloud-init (B2.3).
+# Must be in the pve CLONE_SOURCE_ALLOWLIST. 152 (Kali) stays available for later.
+PROVISION_SOURCE_TEMPLATE = int(os.environ.get("PROVISION_SOURCE_TEMPLATE", "153"))
+# Lab IP network (for cloud-init ipconfig0). Pool is 192.168.100.150-249 /24.
+PROVISION_IP_GATEWAY = os.environ.get("PROVISION_IP_GATEWAY", "192.168.100.1")
+PROVISION_IP_CIDR = int(os.environ.get("PROVISION_IP_CIDR", "24"))
+
 # --- Submissions (hostile-upload pipeline, B0 §13/§20) ---
 # Dedicated volume OUTSIDE the web root / any URL-served path. Never under /app.
 SUBMISSIONS_DIR = os.environ.get("SUBMISSIONS_DIR", "/var/cyberlab-submissions")

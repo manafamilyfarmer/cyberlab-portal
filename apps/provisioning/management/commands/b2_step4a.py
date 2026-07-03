@@ -38,9 +38,9 @@ from apps.provisioning.tasks import provision_shared_instance
 
 PFX = "b2s4a"
 # Two full clones run in PARALLEL (worker concurrency 2) and contend for storage
-# I/O, so each takes longer than a solo clone. The driver polls up to this cap but
-# returns early once both instances settle (running/error).
-POLL_CAP = 600
+# I/O; with B2.3 each also waits ~220s for cloud-init/agent to apply the IP. The
+# driver polls up to this cap but returns early once both instances settle.
+POLL_CAP = 900
 POLL_INTERVAL = 3.0
 factory = APIRequestFactory()
 
