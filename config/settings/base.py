@@ -156,6 +156,20 @@ PROVISION_SOURCE_TEMPLATE = int(os.environ.get("PROVISION_SOURCE_TEMPLATE", "153
 PROVISION_IP_GATEWAY = os.environ.get("PROVISION_IP_GATEWAY", "192.168.100.1")
 PROVISION_IP_CIDR = int(os.environ.get("PROVISION_IP_CIDR", "24"))
 
+# Orphan reaper (periodic Celery-beat sweep). Destroys a 9000-range VM ONLY when
+# it matches the portal name prefix, has NO active DB reservation, and is older
+# than REAPER_GRACE. Also cleans stale reservations + orphaned leases.
+REAPER_ENABLED = os.environ.get("REAPER_ENABLED", "1") not in ("0", "false", "no", "off")
+REAPER_GRACE = int(os.environ.get("REAPER_GRACE", "900"))      # 15 min
+REAPER_INTERVAL = int(os.environ.get("REAPER_INTERVAL", "600"))  # 10 min
+REAPER_NAME_PREFIX = os.environ.get("REAPER_NAME_PREFIX", "b2-")
+CELERY_BEAT_SCHEDULE = {
+    "reap-orphans": {
+        "task": "apps.provisioning.reaper.reap_orphans",
+        "schedule": float(REAPER_INTERVAL),
+    },
+}
+
 # --- Submissions (hostile-upload pipeline, B0 §13/§20) ---
 # Dedicated volume OUTSIDE the web root / any URL-served path. Never under /app.
 SUBMISSIONS_DIR = os.environ.get("SUBMISSIONS_DIR", "/var/cyberlab-submissions")

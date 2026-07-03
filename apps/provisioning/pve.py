@@ -236,6 +236,48 @@ class ProxmoxClient:
                 out.append(vmid)
         return sorted(out)
 
+    def list_target_vms(self):
+        """Read-only: 9000-range VMs with {vmid, name, status, uptime}. Used by
+        the orphan reaper. Enumeration only — every non-target/NEVER_TOUCH VMID
+        is filtered out of the result; never an operation on any listed VM."""
+        resp = self._request("GET", f"/nodes/{self.node}/qemu")
+        if resp.status_code != 200:
+            raise ProxmoxAPIError(
+                f"list qemu HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        data = (self._json(resp) or {}).get("data") or []
+        out = []
+        for vm in data:
+            try:
+                vmid = int(vm.get("vmid"))
+            except (TypeError, ValueError):
+                continue
+            if _in_target_range(vmid):
+                out.append({
+                    "vmid": vmid, "name": vm.get("name"),
+                    "status": vm.get("status"), "uptime": vm.get("uptime"),
+                })
+        return out
+
+    def clone_task_starttime(self, vmid):
+        """Best-effort creation age source for a 9000-range VM: the starttime
+        (epoch seconds) of the most recent qmclone task for this vmid from the
+        node task log. Guarded. Returns None if not found."""
+        vmid = self._guard(vmid, "task_lookup")
+        resp = self._request(
+            "GET", f"/nodes/{self.node}/tasks",
+            params={"limit": 200, "vmid": vmid},
+        )
+        if resp.status_code != 200:
+            return None
+        tasks = (self._json(resp) or {}).get("data") or []
+        times = [
+            t.get("starttime") for t in tasks
+            if str(t.get("id")) == str(vmid)
+            and t.get("type") == "qmclone" and t.get("starttime")
+        ]
+        return max(times) if times else None
+
     # ----------------------------------------------------------- guarded writes
     def clone(self, source, target, name, *, full=True, pool=None):
         source = self._guard(source, "clone_source")

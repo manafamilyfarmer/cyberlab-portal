@@ -13,6 +13,8 @@ app.conf.result_backend = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis
 # Read any CELERY_* settings from Django config, then autodiscover tasks.
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
+# Also discover reaper.py modules (the orphan reaper lives outside tasks.py).
+app.autodiscover_tasks(related_name="reaper")
 
 
 @app.task(bind=True, ignore_result=True)
