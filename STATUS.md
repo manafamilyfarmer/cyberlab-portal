@@ -2,7 +2,7 @@
 
 Live "you are here" for the build. Updated as the last action of each step. The commit log is the authoritative ledger; this file is the human pointer.
 
-Last updated: 2026-07-03 · HEAD: 820e203
+Last updated: 2026-07-03 · HEAD: eaf691f
 
 ## Done
 - B0 — portal design (v1.1) accepted.
