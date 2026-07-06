@@ -36,3 +36,6 @@ Last updated: 2026-07-03 · HEAD: eaf691f
 - LabExercise -> LabTemplate FK (deferred from B1).
 - SO mirror script pool-aware — before B3 (host-side).
 - Migrate portaldb to a dedicated non-target DB host at B3.
+
+## Recovery / ops log
+- 2026-07-06: Proxmox host hardware failure; chassis swapped (same Z820 model, new board rev 2013 / 2x E5-2697 v2 / BIOS J63 v3.16, UEFI boot); disks moved; all pools active; core VMs restored; SO mirror verified post-reboot; portal stack verification PARTIAL — app stack (web/worker/beat/redis/clamav all Up, RestartCount 0), portaldb PG16 crash-recovered clean + TLSv1.3 OK, Celery worker+beat reaper 600s live, ClamAV up, Proxmox scoped token + pool read OK, no stray 9000-range VMIDs, IPLease clean, repo clean; EXCEPTION: VM114 wazuh-agent (ID 005) NOT connected to mgr 192.168.100.70 (state=pending, 0 keepalives/msgs sent, no socket to manager) — regression from the unclean shutdown; flagged for operator, no fix applied (Phase-0 read-only).
