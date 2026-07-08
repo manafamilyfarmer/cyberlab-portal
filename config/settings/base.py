@@ -156,6 +156,36 @@ PROVISION_SOURCE_TEMPLATE = int(os.environ.get("PROVISION_SOURCE_TEMPLATE", "153
 PROVISION_IP_GATEWAY = os.environ.get("PROVISION_IP_GATEWAY", "192.168.100.1")
 PROVISION_IP_CIDR = int(os.environ.get("PROVISION_IP_CIDR", "24"))
 
+# --- SEAM 1 (SOP §11): the Proxmox NODE name is a SETTING, never hardcoded in
+# pve.py. Every node reference in the Proxmox client reads this. Change this ONE
+# value to move provisioning to another node without touching pve.py URLs/paths.
+PROVISION_TARGET_NODE = os.environ.get("PROVISION_TARGET_NODE", "proxmox")
+
+# --- SEAM 2 (SOP §11): lifecycle mode.
+#   "persistent" (pilot DEFAULT) = one PERSISTENT box per student: created once,
+#       kept for the pilot, started-on-login, stopped/destroyed on explicit action.
+#   "ephemeral"  (future scale)  = a NOT-IMPLEMENTED stub that raises
+#       NotImplementedError. The seam exists so the future path has a home; the
+#       code path does NOT exist yet and must not be built here.
+LIFECYCLE_MODE = os.environ.get("LIFECYCLE_MODE", "persistent")
+
+# --- B3 Step 1: per-student PERSISTENT Kali box ---------------------------------
+# Source template 154 (Kali), FULL clone onto storage lab2-vm. Exactly ONE active
+# box per student, created ONCE (instructor/admin trigger, NOT at login) and kept
+# for the pilot. Must be in the pve CLONE_SOURCE_ALLOWLIST.
+STUDENT_SOURCE_TEMPLATE = int(os.environ.get("STUDENT_SOURCE_TEMPLATE", "154"))
+STUDENT_CLONE_STORAGE = os.environ.get("STUDENT_CLONE_STORAGE", "lab2-vm")
+STUDENT_RAM_MB = int(os.environ.get("STUDENT_RAM_MB", "4096"))
+STUDENT_CORES = int(os.environ.get("STUDENT_CORES", "2"))
+# Concurrency cap for per-student boxes (distinct from the shared cap above).
+STUDENT_MAX_CONCURRENT = int(os.environ.get("STUDENT_MAX_CONCURRENT", "12"))
+# Idle auto-stop is DELIBERATELY OFF for the pilot (boxes are persistent). The
+# stub task exists but is gated on this flag; never enable without operator sign-off.
+STUDENT_IDLE_AUTOSTOP_ENABLED = (
+    os.environ.get("STUDENT_IDLE_AUTOSTOP_ENABLED", "0")
+    not in ("0", "false", "no", "off")
+)
+
 # Orphan reaper (periodic Celery-beat sweep). Destroys a 9000-range VM ONLY when
 # it matches the portal name prefix, has NO active DB reservation, and is older
 # than REAPER_GRACE. Also cleans stale reservations + orphaned leases.

@@ -47,6 +47,10 @@ class StudentProfile(models.Model):
     user = models.OneToOneField(
         User, on_delete=models.CASCADE, related_name="student_profile"
     )
+    # STABLE per-student index (the NN in the per-student box name s<NN>-kali-<vmid>,
+    # B3 Step 1). Assigned once (lowest free int) by allocation.assign_student_index
+    # and never reused/changed. UNIQUE so two students can never share an index.
+    student_index = models.PositiveIntegerField(null=True, blank=True, unique=True)
     mobile = models.CharField(max_length=32, blank=True)
     college = models.CharField(max_length=255, blank=True)
     status = models.CharField(

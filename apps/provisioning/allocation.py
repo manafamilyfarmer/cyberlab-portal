@@ -43,6 +43,56 @@ def _max_concurrent() -> int:
     return int(getattr(settings, "PROVISION_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT))
 
 
+# A PERSISTENT per-student box occupies a VMID/IP slot for its whole life, even
+# while STOPPED — so it counts toward the student cap in every non-torn-down state.
+PERSISTENT_STATUSES = (
+    LabInstance.Status.PENDING,
+    LabInstance.Status.RUNNING,
+    LabInstance.Status.STOPPED,
+)
+
+
+def student_box_count(exclude_labinstance_id=None) -> int:
+    """Count NON-torn-down per-student boxes (pending/running/stopped). Persistent
+    boxes survive stop, so a stopped box still holds its slot."""
+    qs = LabInstance.objects.filter(
+        provisioning_mode=LabInstance.ProvisioningMode.PER_STUDENT,
+        status__in=PERSISTENT_STATUSES,
+    )
+    if exclude_labinstance_id is not None:
+        qs = qs.exclude(pk=exclude_labinstance_id)
+    return qs.count()
+
+
+def assign_student_index(student_profile) -> int:
+    """Return the student's STABLE per-student index (the NN in s<NN>-kali-<vmid>),
+    assigning the lowest free positive integer on first call. Idempotent: once set
+    it never changes. Concurrency-safe — the student's own row is locked
+    (select_for_update) and StudentProfile.student_index is UNIQUE, so two students
+    racing for the same free index resolve via IntegrityError-retry."""
+    from apps.accounts.models import StudentProfile
+
+    for _ in range(50):
+        try:
+            with transaction.atomic():
+                sp = StudentProfile.objects.select_for_update().get(
+                    pk=student_profile.pk
+                )
+                if sp.student_index:
+                    return sp.student_index
+                used = set(
+                    StudentProfile.objects.exclude(student_index__isnull=True)
+                    .values_list("student_index", flat=True)
+                )
+                idx = next(i for i in range(1, 10_000) if i not in used)
+                sp.student_index = idx
+                sp.save(update_fields=["student_index"])
+            return idx
+        except IntegrityError:
+            continue  # another student took this index first; recompute + retry
+    raise CapacityError("could not assign a stable student_index after 50 attempts")
+
+
 def _db_target_vmids() -> set[int]:
     """9000-range VMIDs already reserved/recorded on VMInstance rows."""
     return set(
@@ -65,10 +115,14 @@ def active_instance_count(exclude_labinstance_id=None) -> int:
     return qs.count()
 
 
-def capacity_precheck_db(exclude_labinstance_id=None):
-    """DB-only capacity pre-check. Returns (ok, reason). WEB-SAFE (no Proxmox)."""
-    cap = _max_concurrent()
-    active = active_instance_count(exclude_labinstance_id)
+def capacity_precheck_db(exclude_labinstance_id=None, *, cap=None, active=None):
+    """DB-only capacity pre-check. Returns (ok, reason). WEB-SAFE (no Proxmox).
+
+    `cap`/`active` let a caller substitute a different concurrency budget and
+    counter (e.g. STUDENT_MAX_CONCURRENT + student_box_count for the per-student
+    path) without changing the shared-model defaults."""
+    cap = cap if cap is not None else _max_concurrent()
+    active = active if active is not None else active_instance_count(exclude_labinstance_id)
     if active >= cap:
         return False, f"concurrent-instance cap reached ({active}/{cap})"
     if not IPLease.objects.filter(state=IPLease.State.FREE).exists():
@@ -78,10 +132,10 @@ def capacity_precheck_db(exclude_labinstance_id=None):
     return True, "ok"
 
 
-def capacity_ok(client=None, exclude_labinstance_id=None):
+def capacity_ok(client=None, exclude_labinstance_id=None, *, cap=None, active=None):
     """Authoritative capacity check (WORKER): DB pre-check + live Proxmox VMID
     enumeration. Returns (ok, reason)."""
-    ok, reason = capacity_precheck_db(exclude_labinstance_id)
+    ok, reason = capacity_precheck_db(exclude_labinstance_id, cap=cap, active=active)
     if not ok:
         return ok, reason
     client = client or ProxmoxClient()
@@ -91,7 +145,8 @@ def capacity_ok(client=None, exclude_labinstance_id=None):
     return True, "ok"
 
 
-def allocate_and_reserve_vmid(lab, client=None, *, role=Role.TARGET, max_attempts=None):
+def allocate_and_reserve_vmid(lab, client=None, *, role=Role.TARGET, max_attempts=None,
+                              source_template=None):
     """Atomically reserve the lowest free VMID in 9000..9099 for `lab` by
     INSERTing a VMInstance reservation row (proxmox_status='reserved'). Returns
     the reserved VMInstance. The UNIQUE(vmid) constraint arbitrates: a colliding
@@ -101,6 +156,7 @@ def allocate_and_reserve_vmid(lab, client=None, *, role=Role.TARGET, max_attempt
     The caller clones INTO the reserved vmid — never allocates a bare number.
     """
     client = client or ProxmoxClient()
+    src_template = source_template if source_template is not None else _source_template()
     live = _live_target_vmids(client)  # one Proxmox enumeration per call
     attempts = 0
     cap = max_attempts or _VMID_SLOTS
@@ -120,7 +176,7 @@ def allocate_and_reserve_vmid(lab, client=None, *, role=Role.TARGET, max_attempt
                     vmid=vmid,
                     role=role,
                     proxmox_status=RESERVED,
-                    source_template_vmid=_source_template(),
+                    source_template_vmid=src_template,
                 )
         except IntegrityError:
             # Another task committed this vmid first; retry the next free one.

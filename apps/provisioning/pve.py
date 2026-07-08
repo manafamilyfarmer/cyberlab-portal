@@ -28,7 +28,8 @@ logger = logging.getLogger("apps.provisioning.pve")
 # ---------------------------------------------------------------------------
 # Guard configuration (in-code, not env-driven — cannot be relaxed at runtime)
 # ---------------------------------------------------------------------------
-CLONE_SOURCE_ALLOWLIST = frozenset({151, 152, 153})
+# 154 = Kali template, added for the B3 per-student box (FULL clone onto lab2-vm).
+CLONE_SOURCE_ALLOWLIST = frozenset({151, 152, 153, 154})
 TARGET_VMID_MIN = 9000
 TARGET_VMID_MAX = 9099
 NEVER_TOUCH = frozenset({106, 109, 110})
@@ -49,6 +50,24 @@ class ProxmoxAPIError(RuntimeError):
 
 def _in_target_range(vmid: int) -> bool:
     return TARGET_VMID_MIN <= vmid <= TARGET_VMID_MAX
+
+
+def _resolve_node(env_node: str | None = None) -> str:
+    """SEAM 1: resolve the Proxmox node name. An explicit node in the token file
+    wins (operator override); otherwise settings.PROVISION_TARGET_NODE; final
+    fallback "proxmox". Reading settings is best-effort so pve.py stays importable
+    even if Django isn't configured (e.g. a bare unit test)."""
+    if env_node:
+        return env_node
+    try:
+        from django.conf import settings
+
+        node = getattr(settings, "PROVISION_TARGET_NODE", None)
+        if node:
+            return str(node)
+    except Exception:  # pragma: no cover - settings unavailable
+        pass
+    return "proxmox"
 
 
 def parse_env_file(path: str) -> dict:
@@ -86,7 +105,11 @@ class ProxmoxClient:
         self.base = cfg["PORTAL_PVE_URL"].rstrip("/")
         self._token_id = cfg["PORTAL_PVE_TOKEN_ID"]
         self._token_secret = cfg["PORTAL_PVE_TOKEN_SECRET"]
-        self.node = cfg.get("PORTAL_PVE_NODE", "proxmox")
+        # SEAM 1 (SOP §11): the node name comes from settings.PROVISION_TARGET_NODE
+        # so every node reference below follows one setting. An explicit
+        # PORTAL_PVE_NODE in the token file still overrides it; final fallback is
+        # "proxmox". pve.py never hardcodes the node into a URL/path.
+        self.node = _resolve_node(cfg.get("PORTAL_PVE_NODE"))
         self.pool = cfg.get("PORTAL_PVE_POOL", "cyberlab-agent")
 
         # TLS verification resolves to one of three states, honestly:
@@ -279,7 +302,7 @@ class ProxmoxClient:
         return max(times) if times else None
 
     # ----------------------------------------------------------- guarded writes
-    def clone(self, source, target, name, *, full=True, pool=None):
+    def clone(self, source, target, name, *, full=True, pool=None, storage=None):
         source = self._guard(source, "clone_source")
         target = self._guard(target, "clone_target")
         pool = pool or self.pool
@@ -290,6 +313,14 @@ class ProxmoxClient:
             "pool": pool,
             "target": self.node,
         }
+        # Target storage for a FULL clone (e.g. lab2-vm for the per-student box).
+        # Only valid with full=1; Proxmox rejects `storage` on a linked clone.
+        if storage:
+            if not full:
+                raise ProxmoxAPIError(
+                    "clone: `storage` is only valid for a full clone (full=True)"
+                )
+            params["storage"] = storage
         resp = self._request(
             "POST", f"/nodes/{self.node}/qemu/{source}/clone", data=params
         )
@@ -302,6 +333,29 @@ class ProxmoxClient:
         if not upid:
             raise ProxmoxAPIError(f"clone {source}->{target} returned no UPID")
         return upid
+
+    def set_resources(self, vmid, *, memory=None, cores=None):
+        """Set RAM (MB) and/or vCPU cores on a STOPPED clone via a guarded config
+        PUT (synchronous, no UPID). Guarded to the 9000-range. Used to size the
+        per-student box (4096MB / 2 cores) after the clone inherits the template's
+        defaults. No-op if neither is given."""
+        vmid = self._guard(vmid, "set_resources")
+        data = {}
+        if memory is not None:
+            data["memory"] = int(memory)
+        if cores is not None:
+            data["cores"] = int(cores)
+        if not data:
+            return {"http": None, "noop": True}
+        resp = self._request(
+            "PUT", f"/nodes/{self.node}/qemu/{vmid}/config", data=data
+        )
+        if resp.status_code not in (200, 201):
+            raise ProxmoxAPIError(
+                f"set_resources {vmid} failed HTTP {resp.status_code}: "
+                f"{resp.text[:300]}"
+            )
+        return {"http": resp.status_code, **data}
 
     def start(self, vmid):
         """Power ON (async) -> UPID."""

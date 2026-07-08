@@ -75,6 +75,20 @@ class LabInstance(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
+        constraints = [
+            # B3 Step 1: at most ONE non-torn-down per-student box per student.
+            # Partial unique on owner_student, scoped to per_student mode in a
+            # live state (pending/running/stopped). A destroyed/expired/error box
+            # frees the slot, so re-provisioning after teardown is allowed.
+            models.UniqueConstraint(
+                fields=["owner_student"],
+                condition=models.Q(
+                    provisioning_mode="per_student",
+                    status__in=["pending", "running", "stopped"],
+                ),
+                name="uniq_active_per_student_box",
+            ),
+        ]
 
     def __str__(self):
         return f"LabInstance<{self.pk} {self.status}>"
