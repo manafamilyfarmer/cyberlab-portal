@@ -230,7 +230,10 @@ CAP_TASK = 300            # destroy task poll cap
 # Full clones on shared storage slow down under PARALLEL provisioning (I/O
 # contention roughly doubles clone time), so the clone wait cap is larger than
 # the destroy cap. Still bounded — a breach fails cleanly into error-path reap.
-CAP_CLONE = 600           # clone task poll cap (parallel-provision aware)
+# Raised 600->900 for B3 batch provisioning: a full clone of the heavier Kali
+# template (154) onto lab2-vm measured ~9-10 min under batch I/O contention,
+# close enough to the old 600s cap to trip it; 900s restores headroom.
+CAP_CLONE = 900           # clone task poll cap (batch/parallel-provision aware)
 
 
 @shared_task(bind=True)
@@ -437,7 +440,11 @@ def provision_lifecycle_probe(self, source_vmid: int = 151, target_vmid: int = 9
 # becomes answerable ~220s after the VM reports 'running' (measured on 153), so
 # the apply-confirm cap is generous. Still bounded — a breach fails cleanly into
 # the error-path reap (zero residue).
-CAP_IP_APPLIED = 300   # poll agent until leased IP appears inside the guest
+# Raised 300->600 for B3 batch provisioning on the heavier Kali template (154):
+# when a fresh box boots while several sibling boxes contend for shared storage
+# I/O, cloud-init + guest-agent IP reporting can exceed 300s (measured: the 7
+# first-wave boxes confirmed in 30-105s, but later boxes tripped the 300s cap).
+CAP_IP_APPLIED = 600   # poll agent until leased IP appears inside the guest
 CAP_REACHABLE = 30     # worker TCP-connect to leased_ip:22
 
 
