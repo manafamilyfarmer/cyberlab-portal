@@ -2,7 +2,7 @@
 
 Live "you are here" for the build. Updated as the last action of each step. The commit log is the authoritative ledger; this file is the human pointer.
 
-Last updated: 2026-07-03 · HEAD: eaf691f
+Last updated: 2026-07-08 · HEAD: 0cf94dd
 
 ## Done
 - B0 — portal design (v1.1) accepted.
@@ -15,14 +15,17 @@ Last updated: 2026-07-03 · HEAD: eaf691f
 - B2 orphan reaper — periodic Celery-beat sweep (every REAPER_INTERVAL=600s). Destroys a 9000-range VM ONLY under all four AND-conditions (9000-range + portal name-prefix + no active DB reservation + age>REAPER_GRACE=900s); cleans stale reservations + orphaned leases; audited (reaper.*); dry-run + idempotent. Proven: real orphan reaped + legit instance SKIPPED (reservation) + never-touch 106/109/110 guard-raised + non-prefix skipped. Zero residue. **B3 fan-out gate CLEARED.**
 - Wazuh forwarding **COMPLETE** (closes B2 observability) — **Part 1 (JSON emit):** every write_audit() ALSO emits one compact JSON line to AUDIT_LOG_PATH (/var/cyberlab-portal-logs/audit.jsonl, dedicated volume, NOT web-served, 0640 app:app), IN ADDITION to the unchanged AuditLog DB row. 'cyberlab.audit' logger + RotatingFileHandler (50MiB x5, size-capped) + JSONL formatter; stable schema (@timestamp/event_type/category/actor/actor_role/target_type/target_id/source_ip/result/detail/host); recursive secret-scrub; log-and-continue. Proven: valid JSONL across auth/admin/reaper/provisioning + ok/error/info; both sinks aligned; scrub redacts password/token/key/db_password/nested private_key; non-fatal + recovery; real worker-written provision.*/deprovision.ok. **Part 2 (transport):** VM114 enrolled as a Wazuh agent (ID 005, Active) against the manager at 192.168.100.70, tailing audit.jsonl; end-to-end event confirmed in the stream. Zero residue.
 
+- B3 Step 1 — per-student PERSISTENT provisioning **COMPLETE**. Each enrolled student gets ONE persistent Kali box (FULL clone of template **154** onto **lab2-vm**, 4096MB/2 vCPU, name `s<NN>-kali-<vmid>`), created ONCE by instructor/admin trigger and kept for the pilot. Lifecycle CREATE (once, idempotent — never re-clones) -> PERSIST (survives sessions) -> START-ON-LOGIN (start if stopped, idempotent) -> STOP (explicit, keeps VM+vmid+lease) -> DESTROY (explicit, zero residue). One active box per student enforced by a partial UniqueConstraint; stable unique `StudentProfile.student_index`; STUDENT_MAX_CONCURRENT=12. Web validates + enqueues only (no Proxmox call in the request path); worker clones->sizes->applies leased IP (cloud-init)->starts->confirms IP in guest->reachable. RBAC: student sees/controls ONLY their own box, cannot provision/deprovision. **Two SOP §11 expansion seams:** SEAM 1 PROVISION_TARGET_NODE (every pve.py node ref reads it — node never hardcoded); SEAM 2 LIFECYCLE_MODE=persistent|ephemeral (ephemeral + idle-autostop are NOT-IMPLEMENTED stubs raising NotImplementedError). Verified end-to-end with 2 throwaway students: provision (S1=9000/.150, S2=9001/.151, both running, IP applied, SSH-reachable), idempotent re-provision (same vmid, zero Proxmox calls), bulk provision (S1 untouched), stop->persist (VM survives stopped on Proxmox, vmid+lease retained), start-on-login (same vmid, qmstart not clone), reaper dry-run SKIPS both (prefix+reservation+age, nothing reaped), RBAC isolation (each sees only own box; cross-owner 404) — then torn down to **zero residue** (VMs gone, leases/reservations released) and throwaway entities deleted (permanent per-student anchor course/module/exercise/template kept). Security: secret scan clean; TLS verify ON (pinned CA); NEVER_TOUCH 106/109/110 refused (403) + guard-raised; clones only from allowlist {151-154}; targets only 9000-9099.
+
 ## Learned
+- Persistent per-student boxes are inherently reaper-safe by the SAME orphan-reaper contract used for ephemeral clones: the reaper reaps only under ALL four AND-conditions, and a persistent box fails two independently (name lacks the `b2-` prefix AND it holds an active DB reservation) — no new carve-out needed.
 - Provisioning allocation must be ATOMIC (reserve-then-clone). Check-then-act ("lowest free number" then clone) races under concurrent/retried provisions — two tasks pick the same VMID/IP. The DB (unique constraint + row locks) must arbitrate.
 - Reserving the VMID first also makes the error path reliably reap residue (it knows the exact vmid even on a clone timeout).
 - Parallel full clones contend for storage I/O and run slower — bound the clone wait with headroom (CAP_CLONE=600s), not the single-clone cap.
 - Wazuh stores ALERTS by default, not raw events — a rule match is what surfaces in alerts.json. To archive every ingested event (not just matches), enable logall_json on the manager. So a quiet alerts.json does NOT mean the agent isn't forwarding; confirm at the archive/ingestion layer.
 
 ## In progress / next
-- B2 Step 5 — per-student provisioning model (owner_student binding).
+- B3 Step 2 — provision the real pilot batch (bulk provision-batch over enrolled students; enroll real StudentProfiles + Batch, then instructor triggers per-student boxes).
 
 ## Blocked / waiting
 - (none — B2.3 unblocked; cloud-init template 153 verified and in use.)
