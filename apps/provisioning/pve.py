@@ -301,6 +301,27 @@ class ProxmoxClient:
         ]
         return max(times) if times else None
 
+    def vm_config_ctime(self, vmid):
+        """Best-effort creation epoch (seconds) for a 9000-range VM from the qemu
+        config `meta` line (`...,ctime=<epoch>`), present on PVE 7.2+. Used as a
+        LAST age source before the reaper falls back to a first-seen stamp.
+        Guarded. Returns None if the meta/ctime is unavailable."""
+        try:
+            cfg = self.get_config(vmid)
+        except ProxmoxAPIError:
+            return None
+        meta = (cfg.get("data") or {}).get("meta")
+        if not meta:
+            return None
+        for part in str(meta).split(","):
+            part = part.strip()
+            if part.startswith("ctime="):
+                try:
+                    return int(part.split("=", 1)[1])
+                except (ValueError, IndexError):
+                    return None
+        return None
+
     # ----------------------------------------------------------- guarded writes
     def clone(self, source, target, name, *, full=True, pool=None, storage=None):
         source = self._guard(source, "clone_source")

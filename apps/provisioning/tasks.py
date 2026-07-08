@@ -24,7 +24,7 @@ import time
 
 from celery import shared_task
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.accounts.models import StudentProfile
@@ -42,7 +42,12 @@ from .allocation import (
     release_reservation,
     student_box_count,
 )
-from .pve import ProxmoxClient, ProxmoxAPIError
+from .pve import (
+    ProxmoxClient,
+    ProxmoxAPIError,
+    TARGET_VMID_MAX,
+    TARGET_VMID_MIN,
+)
 
 logger = logging.getLogger("apps.provisioning.tasks")
 
@@ -848,6 +853,57 @@ def _existing_student_box(sp):
             .first())
 
 
+# Bounded self-heal: how many times a provision may reap an orphan blocking its
+# chosen VMID and retry (the next free vmid) before giving up. The 9006 wedge
+# needed exactly this — a stale orphan config the allocator couldn't see made the
+# clone fail "config file already exists" forever. REQUIRED, not optional.
+CLONE_SELF_HEAL_ATTEMPTS = 3
+
+
+def _active_reservation_vmids_excluding(vm):
+    """9000-range VMIDs held by an ACTIVE DB reservation OTHER than `vm` itself.
+    A vmid in this set is a REAL box (or another in-flight reservation) and must
+    NEVER be reaped by the self-heal — only the caller's own just-made reservation
+    is excluded so an orphan at that vmid can be cleared."""
+    qs = VMInstance.objects.filter(vmid__gte=TARGET_VMID_MIN, vmid__lte=TARGET_VMID_MAX)
+    if vm is not None and vm.pk is not None:
+        qs = qs.exclude(pk=vm.pk)
+    return set(qs.values_list("vmid", flat=True))
+
+
+def _reap_orphan_vmid(client, vmid, *, labinstance_id, context):
+    """Guarded self-heal: destroy an ORPHAN occupying `vmid` (present on Proxmox —
+    as a VM and/or a lingering config — with no active reservation but the caller's
+    own). Force-stops if running. Config-existence aware so a stale `.conf` that
+    made a clone fail "config file already exists" is actually cleared. Audited.
+    Returns True if the vmid is gone (no VM AND no config) afterward.
+
+    The caller MUST have already verified `vmid` is not in
+    _active_reservation_vmids_excluding(vm) — this function does not re-check
+    ownership, it only relies on _guard() to keep the destroy inside 9000-9099."""
+    st = client.get_status(vmid)                  # guarded
+    cfg = client.get_config(vmid)                 # guarded
+    if not (st.get("exists") or cfg.get("exists")):
+        return True                               # nothing there to clear
+    cur = (st.get("data") or {}).get("status")
+    if cur == "running":
+        logger.warning("self-heal: orphan %s running -> force stop", vmid)
+        client.stop(vmid)                         # guarded force stop
+        client.wait_status(vmid, "stopped", timeout=CAP_FORCE_STOP)
+    try:
+        du = client.destroy(vmid, purge=True)     # guarded
+        client.wait_task(du, timeout=CAP_TASK)
+    except ProxmoxAPIError:
+        logger.exception("self-heal destroy of orphan %s failed", vmid)
+    gone = not (client.get_status(vmid).get("exists")
+                or client.get_config(vmid).get("exists"))
+    write_audit(None, "provision.self_heal.reaped", target_type="qemu",
+                target_id=vmid, labinstance_id=labinstance_id, gone=gone,
+                reason=f"orphan blocking provision ({context})")
+    logger.warning("self-heal reaped orphan %s (context=%s) gone=%s", vmid, context, gone)
+    return gone
+
+
 @shared_task(bind=True)
 def provision_student_instance(self, student_id: int):
     """CREATE (once) the student's PERSISTENT Kali box: reserve vmid (source 154) +
@@ -932,40 +988,92 @@ def provision_student_instance(self, student_id: int):
     vm = None
     lease = None
     vmid = None
+    leased_ip = None
+    name = None
     clone_done = False
     src_template = _student_source_template()
     storage = getattr(settings, "STUDENT_CLONE_STORAGE", "lab2-vm")
     try:
-        # --- RESERVE vmid (source 154) + ip FIRST ----------------------------
-        vm = allocate_and_reserve_vmid(lab, client=client, role=Role.ATTACKER,
-                                       source_template=src_template)
-        vmid = vm.vmid
-        result["vmid"] = vmid
-        steps["reserved_vmid"] = vmid
-        lease = lease_ip()
-        leased_ip = str(lease.ip)
-        steps["reserved_ip"] = leased_ip
-        name = f"s{idx:02d}-kali-{vmid}"
-        with transaction.atomic():
-            vm.ip = lease
-            vm.hostname = name
-            vm.save(update_fields=["ip", "hostname"])
-            lease.vm_instance = vm
-            lease.save(update_fields=["vm_instance"])
-        write_audit(None, "provision.reserve", target_type="qemu", target_id=vmid,
-                    labinstance_id=lab.pk, student_id=sp.pk, ip=leased_ip)
+        # --- RESERVE vmid + ip, then clone, with BOUNDED SELF-HEAL over an
+        #     ORPHAN blocking the chosen vmid (DEFECT 2 / the 9006 wedge). The
+        #     allocator excludes VMIDs it can SEE live, but a stale orphan config
+        #     the qemu list didn't surface can still occupy the reserved vmid and
+        #     make the clone fail "config file already exists" forever. So: reap
+        #     the orphan (guarded, audited) and retry the next free vmid. -------
+        for attempt in range(1, CLONE_SELF_HEAL_ATTEMPTS + 1):
+            steps.setdefault("clone_attempts", []).append(attempt)
+            # RESERVE vmid (source 154) + ip
+            vm = allocate_and_reserve_vmid(lab, client=client, role=Role.ATTACKER,
+                                           source_template=src_template)
+            vmid = vm.vmid
+            result["vmid"] = vmid
+            steps["reserved_vmid"] = vmid
+            lease = lease_ip()
+            leased_ip = str(lease.ip)
+            steps["reserved_ip"] = leased_ip
+            name = f"s{idx:02d}-kali-{vmid}"
+            with transaction.atomic():
+                vm.ip = lease
+                vm.hostname = name
+                vm.save(update_fields=["ip", "hostname"])
+                lease.vm_instance = vm
+                lease.save(update_fields=["vm_instance"])
+            write_audit(None, "provision.reserve", target_type="qemu", target_id=vmid,
+                        labinstance_id=lab.pk, student_id=sp.pk, ip=leased_ip)
 
-        # --- FULL clone 154 -> reserved vmid onto lab2-vm --------------------
-        write_audit(None, "provision.clone.start", target_type="qemu",
-                    target_id=vmid, source=src_template, labinstance_id=lab.pk,
-                    student_id=sp.pk, name=name, storage=storage)
-        clone_upid = client.clone(src_template, vmid, name, full=True,
-                                  pool=client.pool, storage=storage)
-        steps["clone_upid"] = clone_upid
-        cstat = client.wait_task(clone_upid, timeout=CAP_CLONE)
-        steps["clone_task"] = {"status": cstat.get("status"),
-                               "exitstatus": cstat.get("exitstatus")}
-        clone_done = True
+            # SELF-HEAL (pre-clone): if the reserved vmid is already present on
+            # Proxmox (VM and/or lingering config) and is NOT held by ANOTHER
+            # active reservation, it is an orphan -> reap it before cloning.
+            pre = client.get_status(vmid)
+            pre_cfg = client.get_config(vmid)
+            if (pre.get("exists") or pre_cfg.get("exists")) and \
+                    vmid not in _active_reservation_vmids_excluding(vm):
+                steps.setdefault("self_heal", []).append(
+                    {"vmid": vmid, "phase": "pre-clone", "attempt": attempt})
+                if not _reap_orphan_vmid(client, vmid, labinstance_id=lab.pk,
+                                         context="pre-clone orphan"):
+                    # couldn't clear it -> drop this reservation, try the next vmid
+                    release_reservation(vm)
+                    vm = lease = vmid = None
+                    continue
+
+            # FULL clone 154 -> reserved vmid onto lab2-vm
+            write_audit(None, "provision.clone.start", target_type="qemu",
+                        target_id=vmid, source=src_template, labinstance_id=lab.pk,
+                        student_id=sp.pk, name=name, storage=storage)
+            try:
+                clone_upid = client.clone(src_template, vmid, name, full=True,
+                                          pool=client.pool, storage=storage)
+                steps["clone_upid"] = clone_upid
+                cstat = client.wait_task(clone_upid, timeout=CAP_CLONE)
+                steps["clone_task"] = {"status": cstat.get("status"),
+                                       "exitstatus": cstat.get("exitstatus")}
+                clone_done = True
+                break
+            except ProxmoxAPIError as cexc:
+                # Clone failed. On the LAST attempt re-raise into the error-path
+                # teardown (which reaps the reserved vmid). Otherwise self-heal any
+                # orphan now occupying the vmid and retry the NEXT free vmid.
+                steps.setdefault("clone_failures", []).append(
+                    {"vmid": vmid, "attempt": attempt, "error": str(cexc)[:200]})
+                write_audit(None, "provision.self_heal.retry", target_type="qemu",
+                            target_id=vmid, labinstance_id=lab.pk, attempt=attempt,
+                            error=str(cexc)[:200])
+                logger.warning("clone attempt %s for vmid %s failed (%s); self-heal + retry",
+                               attempt, vmid, cexc)
+                if attempt >= CLONE_SELF_HEAL_ATTEMPTS:
+                    raise
+                if vmid not in _active_reservation_vmids_excluding(vm):
+                    _reap_orphan_vmid(client, vmid, labinstance_id=lab.pk,
+                                      context="post-clone-failure orphan")
+                release_reservation(vm)
+                vm = lease = vmid = None
+                continue
+
+        if not clone_done:
+            raise ProxmoxAPIError(
+                f"clone did not succeed within {CLONE_SELF_HEAL_ATTEMPTS} "
+                "self-heal attempts")
 
         # --- SIZE the box (RAM/cores) on the stopped clone -------------------
         mem = int(getattr(settings, "STUDENT_RAM_MB", 4096))

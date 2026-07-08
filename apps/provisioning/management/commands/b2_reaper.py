@@ -135,11 +135,20 @@ class Command(BaseCommand):
                                     "lab_id": lab_s.pk,
                                     "no_proxmox_vm": not client.get_status(STALE_VMID).get("exists")}
 
-        # --- unit-prove the name-prefix skip on a synthetic non-portal VM -----
-        reap, reasons = vm_reap_decision(
-            {"vmid": 9050, "name": "notportal-9050"}, set(), grace=1, prefix="b2-", age=99999)
-        out["nonprefix_skip"] = {"reap": reap, "reasons": reasons,
-                                 "pass": (reap is False and any("prefix" in r for r in reasons))}
+        # --- unit-prove reaper v2 keys on RESERVATION, not name ---------------
+        # A 9000-range VM with NO reservation, aged past grace, IS reaped even
+        # though its name has no "b2-" prefix (DEFECT 1 fix). The same VM WITH an
+        # active reservation is SKIPPED — reservation is the real protector.
+        reap_norsv, reasons_norsv = vm_reap_decision(
+            {"vmid": 9050, "name": "s07-kali-9050"}, set(), grace=1, age=99999)
+        reap_rsv, reasons_rsv = vm_reap_decision(
+            {"vmid": 9050, "name": "s07-kali-9050"}, {9050}, grace=1, age=99999)
+        out["reap_by_reservation"] = {
+            "noreservation_reaped": reap_norsv,
+            "reservation_skipped": reap_rsv,
+            "skip_reasons": reasons_rsv,
+            "pass": (reap_norsv is True and reap_rsv is False
+                     and any("reservation" in r for r in reasons_rsv))}
         out["ip_pool_free"] = IPLease.objects.filter(state="free").count()
         return out
 

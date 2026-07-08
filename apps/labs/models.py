@@ -6,6 +6,7 @@ records. Cross-app FKs use string references ("curriculum.LabExercise", etc.)
 so labs depends on curriculum/accounts, never the reverse.
 """
 from django.db import models
+from django.utils import timezone
 
 
 class Role(models.TextChoices):
@@ -143,3 +144,29 @@ class VMInstance(models.Model):
 
     def __str__(self):
         return f"VMInstance<{self.vmid or 'unassigned'} {self.role}>"
+
+
+class ReaperSighting(models.Model):
+    """First-seen stamp for an un-ageable 9000-range orphan (reaper v2).
+
+    The orphan reaper reaps a 9000-range VM only when it has NO active DB
+    reservation AND it is older than the grace window. Age normally comes from
+    uptime / the qmclone task / the config ctime — but if NONE of those resolve,
+    the reaper must not skip the orphan forever (that was how an un-ageable orphan
+    could linger indefinitely). Instead it records a first-seen stamp here on the
+    first sweep; on a LATER sweep, once (now - first_seen) >= grace, the orphan is
+    reaped. Net effect: an un-ageable orphan is reaped within ~2 grace windows and
+    can never linger forever, while a box with an active reservation (every pilot
+    box) is never stamped and never touched. The row is deleted when the vmid is
+    reaped or regains a reservation, so it self-cleans.
+    """
+
+    vmid = models.PositiveIntegerField(unique=True)
+    name = models.CharField(max_length=255, blank=True)
+    first_seen = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("vmid",)
+
+    def __str__(self):
+        return f"ReaperSighting<{self.vmid} @ {self.first_seen:%Y-%m-%dT%H:%M:%S}>"
