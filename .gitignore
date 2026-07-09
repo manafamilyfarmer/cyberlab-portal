@@ -10,6 +10,11 @@ wg/
 manifest.tsv
 portal-secrets/
 portal-app-secrets/
+# WireGuard status SSH PRIVATE key (B4.5) — never commit. The pinned known_hosts
+# under deploy/wg-status/ is the host PUBLIC key and IS committed on purpose.
+id_wgstatus
+wg-status/id_*
+*id_wgstatus*
 
 # Python
 __pycache__/

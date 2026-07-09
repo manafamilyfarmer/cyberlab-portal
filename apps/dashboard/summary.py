@@ -7,6 +7,7 @@ endpoint and the rendered dashboard, so the two can never disagree.
 """
 from apps.accounts.models import StudentProfile
 from apps.labs.models import IPLease, WireGuardPeer
+from apps.provisioning import wgstatus
 
 from . import scoping
 
@@ -43,13 +44,20 @@ def build_summary(request):
             .count(),
             "access_sessions": scoping.scoped_sessions(request).count(),
             "reservations": scoping.scoped_reservations(request).count(),
-            # B4.4: non-secret WG connection info for the student's own peer. The
-            # config bytes are NEVER put here — the template links to the
-            # authenticated download endpoint instead.
+            # B4.4/B4.5: non-secret WG info for the student's own peer. The config
+            # bytes are NEVER put here — the template links to the authenticated
+            # download endpoint instead. connected is the live status (B4.5): the
+            # cached vpn01 poll (True/False/None=unknown). No pubkeys/transfer
+            # internals are exposed to the student.
             "wireguard": {
                 "available": peer is not None,
                 "tunnel_ip": peer.tunnel_ip if peer else None,
                 "kali_ip": peer.kali_ip if peer else None,
+                "connected": (
+                    wgstatus.get_status(peer.id)["connected"]
+                    if peer is not None
+                    else None
+                ),
             },
         }
     elif role == "instructor":

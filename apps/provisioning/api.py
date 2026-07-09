@@ -33,6 +33,8 @@ from apps.audit.services import write_audit
 from apps.curriculum.models import Batch, LabExercise
 from apps.labs.models import LabInstance, WireGuardPeer
 
+from . import wgstatus
+
 from .allocation import capacity_precheck_db, student_box_count
 from .serializers import LabInstanceSerializer
 from .tasks import (
@@ -323,15 +325,21 @@ class MyLabViewSet(viewsets.GenericViewSet):
     def _wg_block(self, request, peer):
         """Non-secret WireGuard block for the /api/my-lab response. Never includes
         config bytes or the download counters' internals — just what the student
-        needs to connect + a link to the authenticated download endpoint."""
+        needs to connect + a link to the authenticated download endpoint + live
+        connection status (B4.5, cached from the read-only vpn01 poll)."""
         if peer is None:
             return {
                 "wg_config_available": False,
                 "tunnel_ip": None,
                 "kali_ip": None,
                 "download_url": None,
-                "connected": None,  # live status is B4.5 (Step 5)
+                "connected": None,      # unknown / never polled
+                "last_handshake": None,
             }
+        # connected: True|False|None (None = unknown/never polled). Reads ONLY the
+        # caller's own peer cache — RBAC is unchanged from B4.4 (peer resolved from
+        # the caller's StudentProfile).
+        status = wgstatus.get_status(peer.id)
         return {
             "wg_config_available": self._config_path(peer) is not None,
             "tunnel_ip": peer.tunnel_ip,
@@ -339,7 +347,8 @@ class MyLabViewSet(viewsets.GenericViewSet):
             "download_url": request.build_absolute_uri(
                 reverse("my-lab-wireguard-config")
             ),
-            "connected": None,  # live status is B4.5 (Step 5)
+            "connected": status["connected"],
+            "last_handshake": status["last_handshake"],
         }
 
     def list(self, request):

@@ -19,6 +19,15 @@
   <h2>My VPN access</h2>
   {% with wg=s.wireguard %}
   {% if wg.available %}
+  <p>
+    {% if wg.connected is True %}
+      <strong style="color:#0a0;border:1px solid #0a0;padding:2px 8px;border-radius:10px">● Connected</strong>
+    {% elif wg.connected is False %}
+      <strong style="color:#a00;border:1px solid #a00;padding:2px 8px;border-radius:10px">○ Not connected</strong>
+    {% else %}
+      <strong style="color:#888;border:1px solid #888;padding:2px 8px;border-radius:10px">— Status unavailable</strong>
+    {% endif %}
+  </p>
   <ul>
     <li>Tunnel IP: {{ wg.tunnel_ip }}</li>
     <li>My Kali box: {{ wg.kali_ip }}</li>

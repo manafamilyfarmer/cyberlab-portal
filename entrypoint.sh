@@ -51,6 +51,25 @@ if [ "$(id -u)" = "0" ] && [ -d "$WG_SRC_DIR" ]; then
     done
 fi
 
+# Stage an app-readable copy of the read-only WireGuard STATUS SSH key (B4.5).
+# Same pattern as the wg configs above: the host file stays root:root 600 on the
+# read-only bind mount (app cannot read it), so while still root we copy it into
+# ephemeral tmpfs as app:app 0400. The poller reads it via settings.WG_STATUS_KEY.
+# Only the PRIVATE key is staged; the pinned known_hosts (public, non-secret) is
+# baked into the image under deploy/wg-status/.
+WGS_SRC_KEY="${WG_STATUS_SOURCE_KEY:-/run/portal-secrets/wg-status/id_wgstatus}"
+WGS_APP_KEY="${WG_STATUS_KEY:-/run/portal-app-secrets/wg-status/id_wgstatus}"
+if [ "$(id -u)" = "0" ] && [ -r "$WGS_SRC_KEY" ]; then
+    WGS_APP_DIR=$(dirname "$WGS_APP_KEY")
+    WGS_APP_PARENT=$(dirname "$WGS_APP_DIR")
+    mkdir -p "$WGS_APP_DIR"
+    chown root:app "$WGS_APP_PARENT" "$WGS_APP_DIR"
+    chmod 750 "$WGS_APP_PARENT" "$WGS_APP_DIR"
+    cp "$WGS_SRC_KEY" "$WGS_APP_KEY"
+    chown app:app "$WGS_APP_KEY"
+    chmod 400 "$WGS_APP_KEY"
+fi
+
 # Ensure the submissions volume exists, owned by the app user, mode 700
 # (files themselves are written 0600 by the upload view). Runs as root before
 # dropping privileges so the daemon-mounted volume gets the right ownership.

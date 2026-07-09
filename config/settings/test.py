@@ -36,6 +36,15 @@ AUDIT_LOG_PATH = os.path.join(_AUDIT_TMP, "audit.jsonl")
 # Default WG dir for tests (individual tests override with a fixture dir).
 WG_SECRETS_DIR = tempfile.mkdtemp(prefix="cyberlab-test-wg-")
 
+# No Redis in the test env: use an in-process LocMem cache. Tests write and read
+# the WG-status cache within one process, so LocMem is sufficient and hermetic.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "wgstatus-test",
+    }
+}
+
 # Don't let django-axes touch the DB backend during unit tests.
 AXES_ENABLED = False
 

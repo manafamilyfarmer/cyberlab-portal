@@ -6,8 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # gosu lets the entrypoint read root:600 secrets, then drop to a non-root user.
+# openssh-client is the read-only WireGuard status channel to vpn01 (B4.5): the
+# poller shells out to `ssh` with a fixed argv + pinned known_hosts.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gosu \
+    && apt-get install -y --no-install-recommends gosu openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root application user.

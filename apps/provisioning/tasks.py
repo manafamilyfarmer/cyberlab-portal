@@ -1420,3 +1420,15 @@ def stop_idle_students(self):
     raise NotImplementedError(
         "idle auto-stop is enabled by config but not implemented for the pilot "
         "(persistent boxes). Implement + get operator sign-off before enabling.")
+
+
+@shared_task(bind=True, ignore_result=True)
+def poll_wireguard_status(self):
+    """B4.5 — read-only WireGuard status poll of vpn01 -> per-peer cache.
+
+    Self-contained and idempotent (cache-only, no DB writes, no Proxmox, no writes
+    to vpn01). Never raises on SSH failure: poll_and_cache() turns any failure into
+    'unknown' + a warning, so a monitoring outage can never take the portal down."""
+    from .wgstatus import poll_and_cache
+
+    return poll_and_cache()

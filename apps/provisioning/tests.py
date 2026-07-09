@@ -10,10 +10,14 @@ import hashlib
 import json
 import os
 import tempfile
+from unittest import mock
 
+from django.core.cache import cache
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
+
+from apps.provisioning import wgstatus
 
 from apps.accounts.models import StudentProfile, User
 from apps.accounts.permissions import IsWireGuardPeerOwner
@@ -219,3 +223,153 @@ class WireGuardDistributionTests(APITestCase):
         self.assertEqual(wg["kali_ip"], "192.168.100.150")
         self.assertIn("wireguard-config", wg["download_url"])
         self.assertIsNone(wg["connected"])
+
+
+class WireGuardStatusTests(APITestCase):
+    """B4.5 — live WireGuard status poll: parser, freshness, cache, RBAC,
+    resilience. No real vpn01 contact; fetch_raw() is mocked."""
+
+    def setUp(self):
+        cache.clear()
+        course = Course.objects.create(name="Track A", slug="track-a")
+        module = Module.objects.create(course=course, code="A1", title="AppSec")
+        self.exercise = LabExercise.objects.create(
+            module=module, title="Kali box", slug="kali-box"
+        )
+        self.wg_dir = tempfile.mkdtemp(prefix="wgstat-")
+        self.students = {}
+        rows = ["student\ttunnel_ip\tkali_ip\tclient_pubkey"]
+        for idx in (1, 2):
+            username = f"student{idx:02d}"
+            tunnel_ip = f"10.13.13.{149 + idx}"
+            kali_ip = f"192.168.100.{149 + idx}"
+            pubkey = f"PUBKEY{idx:02d}000000000000000000000000000000000000000="
+            user = User.objects.create_user(
+                username=username, password="x", role=User.Role.STUDENT
+            )
+            sp = StudentProfile.objects.create(user=user, student_index=idx)
+            lease = IPLease.objects.create(ip=kali_ip, state=IPLease.State.LEASED)
+            lab = LabInstance.objects.create(
+                owner_student=sp, lab_exercise=self.exercise,
+                provisioning_mode=LabInstance.ProvisioningMode.PER_STUDENT,
+                status=LabInstance.Status.RUNNING,
+            )
+            vm = VMInstance.objects.create(
+                lab_instance=lab, vmid=8999 + idx, role=Role.ATTACKER, ip=lease
+            )
+            lease.vm_instance = vm
+            lease.save()
+            with open(os.path.join(self.wg_dir, f"{username}.conf"), "wb") as fh:
+                fh.write(b"[Interface]\nPrivateKey = FAKE\n")
+            self.students[username] = {
+                "user": user, "sp": sp, "tunnel_ip": tunnel_ip,
+                "kali_ip": kali_ip, "pubkey": pubkey,
+            }
+            rows.append(f"{username}\t{tunnel_ip}\t{kali_ip}\t{pubkey}")
+        with open(os.path.join(self.wg_dir, "manifest.tsv"), "w") as fh:
+            fh.write("\n".join(rows) + "\n")
+        from django.core.management import call_command
+        with override_settings(WG_SECRETS_DIR=self.wg_dir):
+            call_command("load_wireguard_peers")
+        from apps.labs.models import WireGuardPeer
+        self.peer1 = WireGuardPeer.objects.get(student=self.students["student01"]["sp"])
+        self.peer2 = WireGuardPeer.objects.get(student=self.students["student02"]["sp"])
+
+    # ---- parser + freshness ----------------------------------------------
+    def test_parser_and_freshness(self):
+        now = 1_000_000
+        dump = wgstatus.parse_dump(
+            "PUBKEY01=\t%d\t100\t200\n"
+            "PUBKEY02=\t0\t0\t0\n"
+            "\n"
+            "garbage-line\n" % (now - 10)
+        )
+        self.assertEqual(dump["PUBKEY01="], (now - 10, 100, 200))
+        self.assertEqual(dump["PUBKEY02="], (0, 0, 0))
+        # fresh handshake -> connected; stale + zero -> not.
+        self.assertTrue(wgstatus.compute_connected(now - 10, now_epoch=now, freshness=180))
+        self.assertFalse(wgstatus.compute_connected(now - 1000, now_epoch=now, freshness=180))
+        self.assertFalse(wgstatus.compute_connected(0, now_epoch=now, freshness=180))
+
+    # ---- poll writes cache; unknown pubkey ignored -----------------------
+    def test_poll_caches_connected_and_ignores_unknown(self):
+        now = 2_000_000
+        p1 = self.students["student01"]["pubkey"]
+        p2 = self.students["student02"]["pubkey"]
+        raw = (
+            f"{p1}\t{now - 5}\t10\t20\n"          # fresh -> connected
+            f"{p2}\t{now - 5000}\t0\t0\n"         # stale -> not connected
+            f"UNKNOWNPUBKEY=\t{now}\t1\t1\n"      # not a peer -> ignored
+        )
+        with mock.patch.object(wgstatus, "_now_epoch", return_value=now), \
+             mock.patch.object(wgstatus, "fetch_raw", return_value=raw):
+            summary = wgstatus.poll_and_cache()
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["updated"], 2)
+        self.assertEqual(summary["unknown_pubkeys"], 1)
+        self.assertTrue(wgstatus.get_status(self.peer1.id)["connected"])
+        self.assertIsNotNone(wgstatus.get_status(self.peer1.id)["last_handshake"])
+        self.assertFalse(wgstatus.get_status(self.peer2.id)["connected"])
+
+    # ---- flips true -> false on a later stale poll -----------------------
+    def test_status_flips_false_after_disconnect(self):
+        now = 3_000_000
+        p1 = self.students["student01"]["pubkey"]
+        with mock.patch.object(wgstatus, "_now_epoch", return_value=now), \
+             mock.patch.object(wgstatus, "fetch_raw", return_value=f"{p1}\t{now-5}\t1\t1\n"):
+            wgstatus.poll_and_cache()
+        self.assertTrue(wgstatus.get_status(self.peer1.id)["connected"])
+        # Later poll: same handshake epoch, but now is far past the freshness window.
+        later = now + 10_000
+        with mock.patch.object(wgstatus, "_now_epoch", return_value=later), \
+             mock.patch.object(wgstatus, "fetch_raw", return_value=f"{p1}\t{now-5}\t1\t1\n"):
+            wgstatus.poll_and_cache()
+        self.assertFalse(wgstatus.get_status(self.peer1.id)["connected"])
+
+    # ---- API: my-lab exposes connected + last_handshake, per-student -----
+    def test_my_lab_connected_is_per_student(self):
+        now = 4_000_000
+        p1 = self.students["student01"]["pubkey"]
+        p2 = self.students["student02"]["pubkey"]
+        raw = f"{p1}\t{now-5}\t1\t1\n{p2}\t{now-9999}\t1\t1\n"
+        with mock.patch.object(wgstatus, "_now_epoch", return_value=now), \
+             mock.patch.object(wgstatus, "fetch_raw", return_value=raw):
+            wgstatus.poll_and_cache()
+        # student01 sees connected True (own), student02 sees False (own).
+        self.client.force_authenticate(user=self.students["student01"]["user"])
+        r1 = self.client.get("/api/my-lab/")
+        self.assertEqual(r1.status_code, 200)
+        self.assertIs(r1.data["wireguard"]["connected"], True)
+        self.assertIsNotNone(r1.data["wireguard"]["last_handshake"])
+
+        self.client.force_authenticate(user=self.students["student02"]["user"])
+        r2 = self.client.get("/api/my-lab/")
+        self.assertIs(r2.data["wireguard"]["connected"], False)
+
+    # ---- resilience: vpn01 unreachable -> unknown, endpoint still 200 ----
+    def test_unreachable_yields_unknown_no_exception(self):
+        # No poll yet -> cache miss -> connected None.
+        self.client.force_authenticate(user=self.students["student01"]["user"])
+        r = self.client.get("/api/my-lab/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.data["wireguard"]["connected"])
+        # A failing poll must not raise and must not write anything.
+        with mock.patch.object(wgstatus, "fetch_raw", side_effect=RuntimeError("boom")):
+            summary = wgstatus.poll_and_cache()
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["updated"], 0)
+        r2 = self.client.get("/api/my-lab/")
+        self.assertEqual(r2.status_code, 200)
+        self.assertIsNone(r2.data["wireguard"]["connected"])
+
+    # ---- hardened ssh argv: strict host-key checking, no accept-new ------
+    def test_ssh_argv_is_hardened_fixed_list(self):
+        argv = wgstatus.build_ssh_argv()
+        self.assertEqual(argv[0], "ssh")
+        joined = " ".join(argv)
+        self.assertIn("StrictHostKeyChecking=yes", joined)
+        self.assertIn("BatchMode=yes", joined)
+        self.assertNotIn("accept-new", joined)
+        self.assertNotIn("StrictHostKeyChecking=no", joined)
+        # user@host is a single argv element (no shell string).
+        self.assertTrue(any(a.endswith("@192.168.100.7") for a in argv))

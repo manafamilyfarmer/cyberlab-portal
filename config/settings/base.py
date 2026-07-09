@@ -198,6 +198,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.provisioning.reaper.reap_orphans",
         "schedule": float(REAPER_INTERVAL),
     },
+    # B4.5: read-only WireGuard status poll of vpn01 -> per-peer cache. Interval
+    # read from env directly (WG_STATUS_* settings are defined lower in this file).
+    "poll-wireguard-status": {
+        "task": "apps.provisioning.tasks.poll_wireguard_status",
+        "schedule": float(os.environ.get("WG_STATUS_POLL_INTERVAL", "45")),
+    },
 }
 
 # --- Submissions (hostile-upload pipeline, B0 §13/§20) ---
@@ -247,3 +253,45 @@ AUDIT_LOG_BACKUPS = int(os.environ.get("AUDIT_LOG_BACKUPS", "5"))
 WG_SECRETS_DIR = os.environ.get("WG_SECRETS_DIR", "/run/portal-app-secrets/wg")
 # Source (read-only bind mount) the entrypoint stages FROM. Not read by the app.
 WG_SOURCE_DIR = os.environ.get("WG_SOURCE_DIR", "/run/portal-secrets/wg")
+
+# --- WireGuard LIVE status (B4.5): read-only poll of vpn01 -----------------------
+# The portal polls a locked-down forced-command SSH channel on vpn01 and caches
+# per-peer connection state. The portal is READ-ONLY toward vpn01 (no writes).
+# The SSH PRIVATE key is a secret: bind-mounted read-only, staged app-readable
+# 0400 by entrypoint.sh (WG_STATUS_KEY). The pinned known_hosts (host PUBLIC key,
+# non-secret) is baked into the image; the shipped path uses
+# StrictHostKeyChecking=yes — never accept-new.
+WG_STATUS_SOURCE_KEY = os.environ.get(
+    "WG_STATUS_SOURCE_KEY", "/run/portal-secrets/wg-status/id_wgstatus"
+)
+WG_STATUS_KEY = os.environ.get(
+    "WG_STATUS_KEY", "/run/portal-app-secrets/wg-status/id_wgstatus"
+)
+WG_STATUS_HOST = os.environ.get("WG_STATUS_HOST", "192.168.100.7")
+WG_STATUS_USER = os.environ.get("WG_STATUS_USER", "wgstatus")
+WG_STATUS_KNOWN_HOSTS = os.environ.get(
+    "WG_STATUS_KNOWN_HOSTS", str(BASE_DIR / "deploy" / "wg-status" / "known_hosts")
+)
+WG_STATUS_SSH_TIMEOUT = int(os.environ.get("WG_STATUS_SSH_TIMEOUT", "5"))
+# A handshake is "connected" if it is within this many seconds of now.
+WG_STATUS_FRESHNESS_SECONDS = int(os.environ.get("WG_STATUS_FRESHNESS_SECONDS", "180"))
+# Per-peer cache TTL: a few minutes, so a DEAD poller expires to "unknown"
+# (connected=null) rather than serving a stale "connected".
+WG_STATUS_CACHE_TTL = int(os.environ.get("WG_STATUS_CACHE_TTL", "300"))
+# Poll cadence (Celery beat), 30–60s.
+WG_STATUS_POLL_INTERVAL = int(os.environ.get("WG_STATUS_POLL_INTERVAL", "45"))
+# Feature flag: the poll task no-ops unless the staged status key is present.
+WG_STATUS_ENABLED = os.environ.get("WG_STATUS_ENABLED", "1") not in (
+    "0", "false", "no", "off",
+)
+
+# --- Cache (shared, Redis) -------------------------------------------------------
+# A SHARED cache is required: the poller runs in the worker/beat process and the
+# reader (/api/my-lab) runs in the web process — different containers. LocMem
+# would not be shared. Uses a SEPARATE redis DB (1) from Celery's broker (0).
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": os.environ.get("PORTAL_CACHE_URL", "redis://redis:6379/1"),
+    }
+}
