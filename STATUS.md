@@ -2,9 +2,11 @@
 
 Live "you are here" for the build. Updated as the last action of each step. The commit log is the authoritative ledger; this file is the human pointer.
 
-Last updated: 2026-07-08 · HEAD: 1014475
+Last updated: 2026-07-09 · HEAD: aa4198b
 
 ## Done
+- **B4.4 done — portal serves per-student WG configs, RBAC+audit; what's next = B4.5 live status / B4 go-live gate.** Distribution/display layer only: pre-generated per-student `.conf` + `manifest.tsv` are bind-mounted RO (600 root:root) at `/run/portal-secrets/wg`; portal does NOT write vpn01 / mint keys. `labs.WireGuardPeer` (migration 0007) holds only a POINTER (`config_secret_ref`) + non-secret metadata (tunnel_ip, kali_ip, client_pubkey, issued/downloaded/count) — never the private key or config text. `load_wireguard_peers` is idempotent, reads manifest.tsv ONLY (never the key-bearing .conf), validates student↔tunnel_ip↔kali_ip↔VMInstance (10 peers, re-run stays 10). `GET /api/my-lab` extended with a WG block (tunnel_ip/kali_ip/wg_config_available/download_url/connected=null); `GET /api/my-lab/wireguard-config` streams the CALLER's own .conf as an attachment, owner-only via `IsWireGuardPeerOwner` (no id param → cross-student access structurally impossible), staff denied, increments count + writes `wireguard_config_download` AuditLog→Wazuh with non-secret detail only. Since the non-root app user cannot read 600 root files, the entrypoint stages app-readable 0400 copies to tmpfs `/run/portal-app-secrets/wg` (mirrors the portal-pve.env pattern); source mount stays RO. Verified LIVE: student01 downloads own (200, byte-identical checksum vs source), cross-student smuggle (?student=/?peer=/id-path) only ever returns own / 404, staff→403, audit row + Wazuh stream line carry NO key material; 7/7 hermetic tests green; secret audit clean (no .conf/manifest/key tracked, .gitignore covers wg). Migration reversible; behavior gated by presence of `WG_SECRETS_DIR` staging.
+- **B4.1–B4.3 (host/vpn side, outside this repo) COMPLETE** — vpn01 stood up + per-student WG peers pre-generated; lab isolation nftables in place; host DNAT for the WG endpoint; external exposure gate **PASS**. **Go-live gate still open: the full isolation matrix is PENDING** (must pass before B4 go-live).
 - B0 — portal design (v1.1) accepted.
 - B1 — manual-assisted portal, all 8 steps COMPLETE and accepted.
 - B2 Step 1 — clone primitive: clone 151->9000 -> record -> destroy -> lease release, zero residue, verified TLS.
@@ -34,7 +36,8 @@ Last updated: 2026-07-08 · HEAD: 1014475
 - Wazuh stores ALERTS by default, not raw events — a rule match is what surfaces in alerts.json. To archive every ingested event (not just matches), enable logall_json on the manager. So a quiet alerts.json does NOT mean the agent isn't forwarding; confirm at the archive/ingestion layer.
 
 ## In progress / next
-- B3 Step 3 — **student ACCESS layer** (WireGuard or Guacamole): the 10 pilot boxes EXIST + are reachable inside the lab net, but a student cannot yet reach their box from a laptop. This is the next build — it turns "boxes provisioned" into "students can log in and work". Also pending: operator fills real student identities + hands out credentials; instructor bulk-manage UI; idle-auto-stop enable decision.
+- B3 Step 3 — **student ACCESS layer** = the B4 (WireGuard) track. **B4.4 DONE** (portal now distributes per-student WG configs, RBAC+audit — see Done). **Next = B4.5 live connection status** (replace the `connected: null` placeholder with real per-peer tunnel/handshake status) and then the **B4 go-live gate** (blocked on the full isolation-matrix pass, B4.1–B4.3). Students can now download their own VPN config from the dashboard; end-to-end "student on a laptop reaches their Kali box" lands once B4.5 + the isolation gate close.
+- Also pending: operator fills real student identities + hands out credentials; instructor bulk-manage UI; idle-auto-stop enable decision.
 - (reaper/provisioner hardening v2 is DONE — see Done, commit `1014475`.)
 
 ## Blocked / waiting
