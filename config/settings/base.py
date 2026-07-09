@@ -235,3 +235,15 @@ AUDIT_LOG_PATH = os.environ.get(
 # see apps.audit.emit for the justification.
 AUDIT_LOG_MAX_BYTES = int(os.environ.get("AUDIT_LOG_MAX_BYTES", str(50 * 1024 * 1024)))
 AUDIT_LOG_BACKUPS = int(os.environ.get("AUDIT_LOG_BACKUPS", "5"))
+
+# --- WireGuard config distribution (B4.4) ---
+# Pre-generated per-student .conf files + manifest.tsv are bind-mounted READ-ONLY
+# at /run/portal-secrets/wg (600 root:root). The non-root "app" user the service
+# runs as CANNOT read those, so the entrypoint stages app-readable 0400 copies
+# into container tmpfs at WG_SECRETS_DIR (mirrors the portal-pve.env staging).
+# The app reads configs from WG_SECRETS_DIR by the DB pointer (config_secret_ref)
+# and streams the bytes at download time; the bytes are NEVER logged and NEVER
+# stored in the DB. The source bind mount stays 600 root:root read-only.
+WG_SECRETS_DIR = os.environ.get("WG_SECRETS_DIR", "/run/portal-app-secrets/wg")
+# Source (read-only bind mount) the entrypoint stages FROM. Not read by the app.
+WG_SOURCE_DIR = os.environ.get("WG_SOURCE_DIR", "/run/portal-secrets/wg")

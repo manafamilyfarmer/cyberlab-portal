@@ -146,6 +146,55 @@ class VMInstance(models.Model):
         return f"VMInstance<{self.vmid or 'unassigned'} {self.role}>"
 
 
+class WireGuardPeer(models.Model):
+    """One WireGuard peer per student (B4.4) — a POINTER + non-secret metadata.
+
+    CRITICAL: this row NEVER holds the private key or the raw .conf text. The
+    config bytes live only in the read-only secrets bind mount; the DB stores
+    ``config_secret_ref`` (the filename under the WG secrets dir, e.g.
+    "student01.conf") plus non-secret fields (tunnel_ip, kali_ip, the client's
+    PUBLIC key, download bookkeeping). The download endpoint streams the file by
+    this pointer and never logs the bytes.
+
+    The peer is bound to the student's persistent Kali box: ``kali_ip`` is the
+    box's leased IP and ``vm_instance`` points at that VMInstance. The loader
+    (load_wireguard_peers) validates tunnel_ip↔kali_ip↔VMInstance consistency
+    from manifest.tsv — it never reads the private-key-bearing .conf.
+    """
+
+    student = models.OneToOneField(
+        "accounts.StudentProfile", on_delete=models.CASCADE,
+        related_name="wireguard_peer",
+    )
+    vm_instance = models.ForeignKey(
+        "labs.VMInstance", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="wireguard_peers",
+    )
+    # Tunnel-side address inside the WG overlay (e.g. 10.13.13.150). Unique.
+    tunnel_ip = models.GenericIPAddressField(protocol="IPv4", unique=True)
+    # The student's Kali box address on the lab network (e.g. 192.168.100.150).
+    kali_ip = models.GenericIPAddressField(protocol="IPv4")
+    # The client's WireGuard PUBLIC key — non-secret (base64, 44 chars).
+    client_pubkey = models.CharField(max_length=64)
+    # POINTER only: filename/relative path of the .conf under the WG secrets dir.
+    # NOT the config contents. Resolved against settings.WG_SECRETS_DIR at
+    # download time; a basename is enforced so it can never traverse the dir.
+    config_secret_ref = models.CharField(max_length=255)
+    # First time the config was actually handed out (set on first download).
+    issued_at = models.DateTimeField(null=True, blank=True)
+    last_downloaded_at = models.DateTimeField(null=True, blank=True)
+    download_count = models.PositiveIntegerField(default=0)
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("tunnel_ip",)
+
+    def __str__(self):
+        return f"WireGuardPeer<{self.student_id} {self.tunnel_ip}>"
+
+
 class ReaperSighting(models.Model):
     """First-seen stamp for an un-ageable 9000-range orphan (reaper v2).
 

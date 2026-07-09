@@ -29,6 +29,28 @@ if [ "$(id -u)" = "0" ] && [ -r "$PVE_SRC" ]; then
     chmod 400 "$PVE_APP_DIR/portal-pve.env"
 fi
 
+# Stage app-readable copies of the WireGuard peer configs + manifest (B4.4).
+# The host files stay root:root 600 on the read-only bind mount, which the
+# unprivileged "app" user cannot read. While still root we copy them into the
+# ephemeral tmpfs (app:app 0400), exactly like the PVE token above. The portal
+# reads configs from WG_APP_DIR (settings.WG_SECRETS_DIR) and streams them; the
+# bytes never enter the repo, the DB, or any log. Re-staged fresh each boot.
+WG_SRC_DIR="${WG_SOURCE_DIR:-/run/portal-secrets/wg}"
+WG_APP_DIR="${WG_SECRETS_DIR:-/run/portal-app-secrets/wg}"
+if [ "$(id -u)" = "0" ] && [ -d "$WG_SRC_DIR" ]; then
+    WG_APP_PARENT=$(dirname "$WG_APP_DIR")
+    mkdir -p "$WG_APP_DIR"
+    chown root:app "$WG_APP_PARENT" "$WG_APP_DIR"
+    chmod 750 "$WG_APP_PARENT" "$WG_APP_DIR"
+    for f in "$WG_SRC_DIR"/manifest.tsv "$WG_SRC_DIR"/*.conf; do
+        [ -r "$f" ] || continue
+        base=$(basename "$f")
+        cp "$f" "$WG_APP_DIR/$base"
+        chown app:app "$WG_APP_DIR/$base"
+        chmod 400 "$WG_APP_DIR/$base"
+    done
+fi
+
 # Ensure the submissions volume exists, owned by the app user, mode 700
 # (files themselves are written 0600 by the upload view). Runs as root before
 # dropping privileges so the daemon-mounted volume gets the right ownership.

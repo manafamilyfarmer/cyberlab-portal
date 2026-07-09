@@ -15,6 +15,27 @@
     <li>Access sessions: {{ s.access_sessions }}</li>
     <li>Reservations: {{ s.reservations }}</li>
   </ul>
+
+  <h2>My VPN access</h2>
+  {% with wg=s.wireguard %}
+  {% if wg.available %}
+  <ul>
+    <li>Tunnel IP: {{ wg.tunnel_ip }}</li>
+    <li>My Kali box: {{ wg.kali_ip }}</li>
+  </ul>
+  <p>
+    <a href="{% url 'my-lab-wireguard-config' %}" download>Download my VPN config</a>
+  </p>
+  <p style="max-width:40em">
+    Import the downloaded <code>.conf</code> into your WireGuard client
+    (WireGuard app → <em>Add tunnel</em> → <em>Import from file</em>), then
+    activate it to reach your Kali box at {{ wg.kali_ip }}. Keep this file
+    private — it contains your personal key.
+  </p>
+  {% else %}
+  <p>No VPN config is available for your account yet.</p>
+  {% endif %}
+  {% endwith %}
   {% endwith %}
   <p><a href="{% url 'me-page' %}">Account</a></p>
 </body>

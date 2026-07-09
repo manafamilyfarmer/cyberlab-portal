@@ -2,6 +2,14 @@
 .env
 *.env
 secrets/
+# WireGuard peer configs + manifest are bind-mounted secrets (B4.4). They live
+# OUTSIDE this repo tree (host /opt/cyberlab-portal/secrets/wg on VM114); these
+# patterns are belt-and-suspenders so a stray copy can never be staged.
+*.conf
+wg/
+manifest.tsv
+portal-secrets/
+portal-app-secrets/
 
 # Python
 __pycache__/

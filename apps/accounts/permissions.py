@@ -58,6 +58,28 @@ class IsOwnerOrStaff(BasePermission):
         return owner_id is not None and owner_id == user.id
 
 
+class IsWireGuardPeerOwner(BasePermission):
+    """Object-level gate for a student's own WireGuard config (B4.4).
+
+    A student may act ONLY on the WireGuardPeer whose ``student`` is their own
+    StudentProfile. Staff (admin/instructor) are explicitly denied here: they
+    never receive another student's private config through any endpoint (they can
+    see metadata via the admin site, not key material). Enforced by matching
+    request.user to peer.student.user, so no id/param manipulation can reach
+    another student's file.
+    """
+
+    message = "You may only download your own WireGuard config."
+
+    def has_permission(self, request, view):
+        return _role(request) == "student"
+
+    def has_object_permission(self, request, view, obj):
+        student = getattr(obj, "student", None)
+        owner_user_id = getattr(student, "user_id", None)
+        return owner_user_id is not None and owner_user_id == request.user.id
+
+
 class StaffMFARequired(BasePermission):
     """Admin/instructor must have a verified TOTP device (django_otp).
 

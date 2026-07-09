@@ -11,18 +11,27 @@ deliberately no `import` of pve / ProxmoxClient in this module.
     instances (status only, no control); instructors see their batches'; admin all.
     Out-of-scope ids are simply not in the queryset -> 404 (object isolation).
 """
+import os
+
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import F, Q
+from django.http import FileResponse, Http404
+from django.urls import reverse
+from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.accounts.models import StudentProfile
-from apps.accounts.permissions import IsAdminOrInstructor, StaffMFARequired
+from apps.accounts.permissions import (
+    IsAdminOrInstructor,
+    IsWireGuardPeerOwner,
+    StaffMFARequired,
+)
 from apps.audit.services import write_audit
 from apps.curriculum.models import Batch, LabExercise
-from apps.labs.models import LabInstance
+from apps.labs.models import LabInstance, WireGuardPeer
 
 from .allocation import capacity_precheck_db, student_box_count
 from .serializers import LabInstanceSerializer
@@ -285,13 +294,115 @@ class MyLabViewSet(viewsets.GenericViewSet):
                 .order_by("created_at")
                 .first())
 
+    def _my_peer(self, user):
+        """The caller's OWN WireGuardPeer (or None). Scoped strictly to the
+        caller's StudentProfile — there is no id parameter, so no request can
+        select another student's peer."""
+        sp = _student_profile(user)
+        if sp is None:
+            return None
+        return (WireGuardPeer.objects
+                .filter(student=sp, active=True)
+                .select_related("student")
+                .first())
+
+    @staticmethod
+    def _config_path(peer):
+        """Absolute path of the peer's .conf under WG_SECRETS_DIR, or None if it
+        is missing / would escape the dir. config_secret_ref is a basename; the
+        realpath containment check is belt-and-suspenders against traversal."""
+        ref = peer.config_secret_ref or ""
+        if not ref or ref != os.path.basename(ref):
+            return None
+        base = os.path.realpath(settings.WG_SECRETS_DIR)
+        path = os.path.realpath(os.path.join(base, ref))
+        if base != path and os.path.commonpath([base, path]) != base:
+            return None
+        return path if os.path.isfile(path) else None
+
+    def _wg_block(self, request, peer):
+        """Non-secret WireGuard block for the /api/my-lab response. Never includes
+        config bytes or the download counters' internals — just what the student
+        needs to connect + a link to the authenticated download endpoint."""
+        if peer is None:
+            return {
+                "wg_config_available": False,
+                "tunnel_ip": None,
+                "kali_ip": None,
+                "download_url": None,
+                "connected": None,  # live status is B4.5 (Step 5)
+            }
+        return {
+            "wg_config_available": self._config_path(peer) is not None,
+            "tunnel_ip": peer.tunnel_ip,
+            "kali_ip": peer.kali_ip,
+            "download_url": request.build_absolute_uri(
+                reverse("my-lab-wireguard-config")
+            ),
+            "connected": None,  # live status is B4.5 (Step 5)
+        }
+
     def list(self, request):
         if _role(request.user) != "student":
             return Response({"detail": "Students only."}, status=403)
+        wg = self._wg_block(request, self._my_peer(request.user))
         box = self._my_box(request.user)
         if box is None:
-            return Response({"detail": "No lab box provisioned yet."}, status=404)
-        return Response(LabInstanceSerializer(box).data)
+            return Response(
+                {"detail": "No lab box provisioned yet.", "wireguard": wg},
+                status=404,
+            )
+        data = LabInstanceSerializer(box).data
+        data["wireguard"] = wg
+        return Response(data)
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="wireguard-config",
+        url_name="wireguard-config",
+        permission_classes=[IsAuthenticated, IsWireGuardPeerOwner],
+    )
+    def wireguard_config(self, request):
+        """Stream the CALLER's own WireGuard .conf as an attachment.
+
+        RBAC: IsWireGuardPeerOwner (student-only) + the object-level match below.
+        The peer is resolved solely from the caller's StudentProfile, so no id or
+        query param can reach another student's file. The bytes are streamed from
+        the read-only secrets mount and NEVER logged; the audit detail carries
+        only non-secret metadata.
+        """
+        peer = self._my_peer(request.user)
+        if peer is None:
+            raise Http404("No WireGuard config available.")
+        # Explicit "match request.user's StudentProfile to peer.student" gate.
+        self.check_object_permissions(request, peer)
+
+        path = self._config_path(peer)
+        if path is None:
+            raise Http404("WireGuard config not available.")
+
+        now = timezone.now()
+        updates = {"download_count": F("download_count") + 1, "last_downloaded_at": now}
+        if peer.issued_at is None:
+            updates["issued_at"] = now
+        WireGuardPeer.objects.filter(pk=peer.pk).update(**updates)
+
+        # Audit → AuditLog row + Wazuh JSON stream. NO config bytes here; only
+        # non-secret metadata (filename/IPs are not key material).
+        write_audit(
+            request.user, "wireguard_config_download", request=request,
+            target_type="WireGuardPeer", target_id=peer.pk,
+            tunnel_ip=peer.tunnel_ip, kali_ip=peer.kali_ip,
+            filename=peer.config_secret_ref, download_count=peer.download_count + 1,
+        )
+
+        return FileResponse(
+            open(path, "rb"),
+            as_attachment=True,
+            filename=f"cyberlab-{request.user.username}.conf",
+            content_type="text/plain",
+        )
 
     @action(detail=False, methods=["post"])
     def start(self, request):

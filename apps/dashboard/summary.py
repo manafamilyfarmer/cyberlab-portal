@@ -6,7 +6,7 @@ the corresponding API. The same ``build_summary`` output feeds both the JSON
 endpoint and the rendered dashboard, so the two can never disagree.
 """
 from apps.accounts.models import StudentProfile
-from apps.labs.models import IPLease
+from apps.labs.models import IPLease, WireGuardPeer
 
 from . import scoping
 
@@ -27,6 +27,12 @@ def build_summary(request):
     summary = {"username": user.username, "role": role}
 
     if role == "student":
+        sp = getattr(user, "student_profile", None)
+        peer = (
+            WireGuardPeer.objects.filter(student=sp, active=True).first()
+            if sp is not None
+            else None
+        )
         summary["student"] = {
             "batches": scoping.scoped_batches(request).count(),
             "exercises": scoping.scoped_exercises(request).count(),
@@ -37,6 +43,14 @@ def build_summary(request):
             .count(),
             "access_sessions": scoping.scoped_sessions(request).count(),
             "reservations": scoping.scoped_reservations(request).count(),
+            # B4.4: non-secret WG connection info for the student's own peer. The
+            # config bytes are NEVER put here — the template links to the
+            # authenticated download endpoint instead.
+            "wireguard": {
+                "available": peer is not None,
+                "tunnel_ip": peer.tunnel_ip if peer else None,
+                "kali_ip": peer.kali_ip if peer else None,
+            },
         }
     elif role == "instructor":
         batches = scoping.scoped_batches(request)
