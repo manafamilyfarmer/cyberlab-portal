@@ -4,6 +4,7 @@ celery
 redis
 psycopg[binary]
 gunicorn
+whitenoise==6.12.0
 django-otp
 django-axes
 qrcode

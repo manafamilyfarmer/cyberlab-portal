@@ -1,0 +1,2 @@
+# Placeholder so the project-level static/ dir exists for STATICFILES_DIRS.
+# Custom (non-app) assets land here; populated by the B6 design-system step.

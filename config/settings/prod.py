@@ -35,3 +35,16 @@ CSRF_TRUSTED_ORIGINS = [
     "https://192.168.100.92",
     "http://192.168.100.92:8000",
 ]
+
+# --- Static files (B6.1) ---------------------------------------------------------
+# Fingerprint + pre-compress the collected assets so WhiteNoise can serve them
+# immutable/far-future-cached. PROD-ONLY on purpose: the manifest backend resolves
+# {% static %} through staticfiles.json, which only exists AFTER collectstatic —
+# in dev/test (no collectstatic run) it would raise on every template render. The
+# Dockerfile runs collectstatic against THESE settings, so the manifest is baked.
+STORAGES = {
+    **STORAGES,  # noqa: F405 — keep the inherited "default" file backend
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}

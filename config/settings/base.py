@@ -51,6 +51,10 @@ AUTHENTICATION_BACKENDS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # WhiteNoise serves STATIC_ROOT directly from gunicorn (B6.1) — no nginx in
+    # front of the stack. It must sit immediately after SecurityMiddleware so
+    # static responses still get the security headers but skip session/auth work.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -108,8 +112,20 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "static/"
+# --- Static files (B6.1: served by WhiteNoise, no nginx) -------------------------
+# STATIC_ROOT is the collectstatic OUTPUT dir (/app/staticfiles in the image) and
+# is git-ignored — it is generated at image build time, never committed.
+# STATICFILES_DIRS is the project-level SOURCE dir for custom (non-app) assets.
+STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_DIRS = [BASE_DIR / "static"]
+
+# Spelled out (rather than left to the Django default) so prod.py can override
+# just the "staticfiles" backend while inheriting "default" — see prod.py.
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
