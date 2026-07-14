@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import api
+from . import api, views
 
 # WRITE (validate + enqueue): /api/admin/labinstances[/{id}/deprovision]
 # and per-student boxes: /api/admin/student-labs/{provision,provision-batch,{id}/deprovision}
@@ -26,4 +26,6 @@ read_router.register(
 urlpatterns = [
     path("api/admin/", include(admin_router.urls)),
     path("api/", include(read_router.urls)),
+    # Template (session) frontend — renders the same data as GET /api/my-lab/.
+    path("my-lab/", views.my_lab, name="my-lab-page"),
 ]

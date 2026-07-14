@@ -1,0 +1,55 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}SethuAI CyberLab{% endblock %}</title>
+  {% comment %}
+    Internal-only portal: one hand-written stylesheet, served by WhiteNoise out
+    of STATIC_ROOT. No framework, no CDN, no build step.
+  {% endcomment %}
+  <link rel="stylesheet" href="{% static 'css/sethuai.css' %}">
+  <link rel="icon" href="{% static 'img/sethuai-logo.svg' %}" type="image/svg+xml">
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="nav-brand" href="{% url 'dashboard-page' %}">
+        <img class="nav-logo" src="{% static 'img/sethuai-logo.svg' %}"
+             alt="SethuAI" width="40" height="32">
+        <span>SethuAI CyberLab</span>
+      </a>
+      <div class="nav-spacer"></div>
+      {% if user.is_authenticated %}
+        <span class="nav-user">Signed in as <strong>{{ user.username }}</strong></span>
+        {% comment %}
+          Logout is a POST: a GET logout link is CSRF-triggerable by any page
+          the student visits inside the lab.
+        {% endcomment %}
+        <form method="post" action="{% url 'logout-page' %}">
+          {% csrf_token %}
+          <button type="submit" class="nav-link"
+                  style="background:none;border:0;cursor:pointer;font:inherit;font-size:var(--text-sm)">
+            Sign out
+          </button>
+        </form>
+      {% else %}
+        <a class="nav-link" href="{% url 'login-page' %}">Sign in</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span>SethuAI CyberLab — internal training portal.</span>
+      <span>Where AI meets reality.</span>
+    </div>
+  </footer>
+  {% block body_extra %}{% endblock %}
+</body>
+</html>

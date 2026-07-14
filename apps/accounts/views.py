@@ -7,6 +7,8 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
+from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.http import require_POST
 from django_otp import login as otp_login
 from django_otp.plugins.otp_totp.models import TOTPDevice
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -128,8 +130,31 @@ class StaffPingView(APIView):
 
 # --- Minimal template views (session frontend) ---
 
+def _safe_next(request):
+    """The ?next= target, but only if it is a local path on this host.
+
+    @login_required sends users here as /accounts/login/?next=/my-lab/, so the
+    form has to honour it or every deep link dead-ends on the landing page. The
+    host/scheme check is what stops ?next=https://evil/ turning the login form
+    into an open redirect.
+    """
+    nxt = request.POST.get("next") or request.GET.get("next")
+    if nxt and url_has_allowed_host_and_scheme(
+        nxt, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return nxt
+    return None
+
+
+def _post_login_landing(user):
+    """Where a role lands when there is no ?next= to honour."""
+    if getattr(user, "role", None) == "student":
+        return "my-lab-page"
+    return "dashboard-page"
+
+
 def login_page(request):
-    """Basic /accounts/login/ form (functional, not polished)."""
+    """Branded /accounts/login/ form (session frontend)."""
     error = None
     if request.method == "POST":
         username = request.POST.get("username", "")
@@ -143,10 +168,28 @@ def login_page(request):
             login(request, user)
             if getattr(user, "is_staff_role", False) and _confirmed_totp(user) is None:
                 return redirect("totp-enroll")
-            return redirect("me-page")
+            # Staff still finish MFA on their own pages; ?next= is honoured for
+            # everyone else so deep links survive the login round-trip.
+            return redirect(_safe_next(request) or _post_login_landing(user))
         elif error is None:
             error = "Invalid credentials."
-    return render(request, "accounts/login.html", {"error": error})
+    return render(
+        request, "accounts/login.html", {"error": error, "next": _safe_next(request)}
+    )
+
+
+@require_POST
+@login_required
+def logout_page(request):
+    """Session logout for the template frontend -> back to the login page.
+
+    POST-only: a GET logout can be triggered by any page a student visits inside
+    the lab (an <img src> is enough), which is exactly the CSRF class this
+    portal's targets can serve. Audited like the API logout.
+    """
+    write_audit(request.user, "auth.logout", request=request)
+    logout(request)
+    return redirect("login-page")
 
 
 @login_required

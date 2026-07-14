@@ -11,6 +11,7 @@ urlpatterns = [
     path("api/staff/ping", views.StaffPingView.as_view(), name="api-staff-ping"),
     # Template (session) frontend
     path("accounts/login/", views.login_page, name="login-page"),
+    path("accounts/logout/", views.logout_page, name="logout-page"),
     path("accounts/me/", views.me_page, name="me-page"),
     path("accounts/totp/enroll/", views.totp_enroll, name="totp-enroll"),
 ]

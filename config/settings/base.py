@@ -72,7 +72,9 @@ ROOT_URLCONF = "config.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        # Project-level templates (B6.2): base.html + the pages that are not
+        # owned by a single app. App template dirs still resolve via APP_DIRS.
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -99,6 +101,12 @@ DATABASES = {
         "OPTIONS": {"sslmode": os.environ.get("PORTAL_DB_SSLMODE", "require")},
     }
 }
+
+# Session frontend entry point. @login_required and LoginRequiredMixin redirect
+# here; the view itself already lives at /accounts/login/ (B1).
+LOGIN_URL = "/accounts/login/"
+LOGIN_REDIRECT_URL = "/dashboard/"
+LOGOUT_REDIRECT_URL = "/accounts/login/"
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -300,6 +308,52 @@ WG_STATUS_POLL_INTERVAL = int(os.environ.get("WG_STATUS_POLL_INTERVAL", "45"))
 WG_STATUS_ENABLED = os.environ.get("WG_STATUS_ENABLED", "1") not in (
     "0", "false", "no", "off",
 )
+
+# Login name baked into the student Kali template's cloud-init (ciuser), used to
+# render the copy-paste SSH command on /my-lab/. The portal does NOT provision or
+# store this — it is a property of template STUDENT_SOURCE_TEMPLATE, verified
+# against the live VM config on 2026-07-15. If the template's ciuser changes,
+# change this.
+STUDENT_SSH_USER = os.environ.get("STUDENT_SSH_USER", "labadmin")
+
+# --- Shared lab targets (B6.3, display-only) -------------------------------------
+# The three FIXED, egress-locked vulnerable targets. Identical for every student
+# (shared infra, NOT provisioned per-student), so this is a static config list
+# rather than a DB table — there is no per-student state to model.
+#
+# Display-only: the portal never starts, stops, reaches or health-checks these.
+# The pill each card shows is "Shared target", not a live status — nothing here
+# is polled, so claiming "running" would be a guess.
+#
+# Names/VMIDs verified against the Proxmox API; ports verified by probe on
+# 2026-07-15 (Juice Shop listens on :3000, NOT :80). Keep in sync by hand if the
+# lab targets change.
+SHARED_TARGETS = [
+    {
+        "name": "Metasploitable 2",
+        "vmid": 103,
+        "hostname": "metasploitable",
+        "ip": "192.168.100.30",
+        "blurb": "Classic vulnerable Linux host — services, not a web app.",
+        "url": None,  # no web UI to link to
+    },
+    {
+        "name": "DVWA",
+        "vmid": 104,
+        "hostname": "dvwa01",
+        "ip": "192.168.100.40",
+        "blurb": "Damn Vulnerable Web Application.",
+        "url": "http://192.168.100.40/",
+    },
+    {
+        "name": "OWASP Juice Shop",
+        "vmid": 105,
+        "hostname": "websec01",
+        "ip": "192.168.100.41",
+        "blurb": "Modern vulnerable web app (OWASP Top 10).",
+        "url": "http://192.168.100.41:3000/",
+    },
+]
 
 # --- Cache (shared, Redis) -------------------------------------------------------
 # A SHARED cache is required: the poller runs in the worker/beat process and the

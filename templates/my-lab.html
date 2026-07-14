@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% comment %}
+  Student "My Lab" — B6.3.
+
+  Every value here comes from apps.provisioning.mylab.my_lab_context(), which is
+  the same data GET /api/my-lab/ serves the requesting student. Nothing on this
+  page is sample/placeholder content: a section with no data source renders an
+  explicit empty state instead.
+{% endcomment %}
+{% block title %}My Lab — SethuAI CyberLab{% endblock %}
+
+{% block content %}
+<div class="page stack" style="gap:var(--space-5)">
+
+  <div class="page-head">
+    <h1>My Lab</h1>
+    <p class="sub">Your personal attack box, VPN access and shared targets.</p>
+  </div>
+
+  <div class="grid">
+    {# ---------------------------------------------------- VPN connection ---- #}
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">VPN connection</span>
+        {% if wireguard.connected is True %}
+          <span class="pill pill-success">Connected</span>
+        {% elif wireguard.connected is False %}
+          <span class="pill pill-muted">Offline</span>
+        {% else %}
+          {% comment %}
+            connected is None = the B4.5 poller cache has no fresh entry. Say
+            "unknown", never "offline" — a dead poller is not a disconnection.
+          {% endcomment %}
+          <span class="pill pill-warning">Status unknown</span>
+        {% endif %}
+      </div>
+
+      {% if wireguard.wg_config_available or wireguard.tunnel_ip %}
+        <div class="data-row">
+          <span class="key">Tunnel IP</span>
+          <span class="val mono">{{ wireguard.tunnel_ip|default:"—" }}</span>
+        </div>
+        <div class="data-row">
+          <span class="key">Last handshake</span>
+          <span class="val">
+            {% if wireguard.last_handshake %}{{ wireguard.last_handshake }}
+            {% else %}<span class="muted">Never</span>{% endif %}
+          </span>
+        </div>
+
+        <div style="margin-top:var(--space-4)" class="stack">
+          {% if wireguard.wg_config_available %}
+            <a class="btn btn-primary btn-block"
+               href="{% url 'my-lab-wireguard-config' %}" download>
+              Download VPN config
+            </a>
+            <p class="small muted tight">
+              Import the <code>.conf</code> into your WireGuard client
+              (<em>Add tunnel → Import from file</em>), then activate it. This file
+              contains your personal private key — never share it.
+            </p>
+          {% else %}
+            <p class="notice">
+              Your VPN config has not been issued yet. Ask your instructor to
+              enable VPN access for your account.
+            </p>
+          {% endif %}
+          <a class="btn btn-block" href="{{ request.path }}">Refresh status</a>
+        </div>
+      {% else %}
+        <div class="empty">No VPN peer is assigned to your account yet.</div>
+      {% endif %}
+    </section>
+
+    {# ------------------------------------------------------ your machine ---- #}
+    <section class="card card-feature">
+      <div class="card-head">
+        <span class="card-title">Your machine</span>
+        {% if vm %}
+          {% if vm.proxmox_status == "running" %}
+            <span class="pill pill-success">Running</span>
+          {% elif vm.proxmox_status == "stopped" %}
+            <span class="pill pill-muted">Stopped</span>
+          {% else %}
+            <span class="pill pill-warning">{{ vm.proxmox_status|default:"Unknown" }}</span>
+          {% endif %}
+        {% elif box %}
+          <span class="pill pill-warning">{{ box.status }}</span>
+        {% endif %}
+      </div>
+
+      {% if box %}
+        <div class="data-row">
+          <span class="key">Hostname</span>
+          <span class="val mono">{{ vm.hostname|default:"—" }}</span>
+        </div>
+        <div class="data-row">
+          <span class="key">Address</span>
+          <span class="val mono">{{ machine_ip|default:"—" }}</span>
+        </div>
+        <div class="data-row">
+          <span class="key">Provisioning</span>
+          <span class="val">{{ box.status }}</span>
+        </div>
+
+        {% if machine_ip %}
+          <div style="margin-top:var(--space-4)" class="stack">
+            <span class="stat-label">Connect over SSH</span>
+            <div class="copy">
+              <code id="ssh-cmd">ssh {{ ssh_user }}@{{ machine_ip }}</code>
+              <button class="btn" type="button" data-copy="#ssh-cmd">Copy</button>
+            </div>
+            <p class="small muted tight">
+              Activate the VPN tunnel first — the box is only reachable through it.
+            </p>
+          </div>
+        {% endif %}
+
+        {% comment %}
+          Start/Stop hit the REAL endpoints (POST /api/my-lab/start|stop/),
+          which enqueue Celery tasks and return 202. They are scoped to the
+          caller's own box server-side; nothing here passes an id.
+        {% endcomment %}
+        <div class="row" style="margin-top:var(--space-4)">
+          <form method="post" action="{% url 'my-lab-start' %}" class="js-lab-action">
+            {% csrf_token %}
+            <button class="btn btn-primary" type="submit"
+                    {% if vm.proxmox_status == "running" %}disabled{% endif %}>
+              Start
+            </button>
+          </form>
+          <form method="post" action="{% url 'my-lab-stop' %}" class="js-lab-action">
+            {% csrf_token %}
+            <button class="btn" type="submit"
+                    {% if vm.proxmox_status == "stopped" %}disabled{% endif %}>
+              Stop
+            </button>
+          </form>
+          <span class="small muted js-action-note"></span>
+        </div>
+      {% else %}
+        <div class="empty">
+          No lab box has been provisioned for you yet.<br>
+          Your instructor creates it once, before the course starts.
+        </div>
+      {% endif %}
+    </section>
+  </div>
+
+  {# ------------------------------------------------------ shared targets ---- #}
+  <section class="card">
+    <div class="card-head">
+      <span class="card-title">Shared targets</span>
+      <span class="card-note">
+        Fixed lab infrastructure — the same for every student. No Internet egress.
+      </span>
+    </div>
+    <div class="grid">
+      {% for t in shared_targets %}
+        <div class="list-item" style="align-items:flex-start;flex-direction:column;gap:var(--space-2)">
+          <div class="row-between" style="width:100%">
+            <span class="title">{{ t.name }}</span>
+            {% comment %}
+              Deliberately not a live-status pill: the portal never polls these
+              boxes, so anything else here would be a guess.
+            {% endcomment %}
+            <span class="pill pill-muted">Shared target</span>
+          </div>
+          <span class="meta">{{ t.blurb }}</span>
+          <span class="mono small muted">{{ t.ip }} · {{ t.hostname }}</span>
+          {% if t.url %}
+            <a class="small" href="{{ t.url }}" target="_blank" rel="noopener">
+              Open web app ↗
+            </a>
+          {% else %}
+            <span class="small muted">No web UI — reach its services directly.</span>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ----------------------------------------------------------- exercises ---- #}
+  <section class="card">
+    <div class="card-head">
+      <span class="card-title">Exercises</span>
+      <span class="card-note">
+        {{ exercises|length }} on your course
+      </span>
+    </div>
+
+    {% if exercises %}
+      <div class="list">
+        {% for ex in exercises %}
+          <div class="list-item">
+            <span>
+              <span class="title">{{ ex.title }}</span><br>
+              <span class="meta">{{ ex.module.code }} · {{ ex.module.title }}</span>
+            </span>
+            {% comment %}
+              The ONLY real per-student signal available: does a Submission row
+              exist? That is submission state, not completion — there is no
+              progress model in the portal (see the note below).
+            {% endcomment %}
+            {% if ex.my_submission %}
+              {% with s=ex.my_submission %}
+                {% if s.scan_status == "clean" %}
+                  <span class="pill pill-success">Submitted</span>
+                {% elif s.scan_status == "pending" %}
+                  <span class="pill pill-warning">Scanning</span>
+                {% elif s.scan_status == "infected" %}
+                  <span class="pill pill-danger">Rejected — infected</span>
+                {% else %}
+                  <span class="pill pill-danger">Scan error</span>
+                {% endif %}
+              {% endwith %}
+            {% elif ex.submission_required %}
+              <span class="pill pill-muted">Not submitted</span>
+            {% else %}
+              <span class="pill pill-muted">No submission required</span>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+      <p class="small muted" style="margin-top:var(--space-4)">
+        Pills show your <strong>submission</strong> state, from your own uploads.
+        Per-exercise completion and marks are not tracked yet, so this list is
+        the same for everyone on your course.
+      </p>
+    {% else %}
+      <div class="empty">
+        You are not enrolled on a course with exercises yet.
+      </div>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}
+
+{% block body_extra %}
+<script>
+  // Copy-to-clipboard for the SSH command.
+  document.querySelectorAll("[data-copy]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var el = document.querySelector(btn.dataset.copy);
+      if (!el) return;
+      navigator.clipboard.writeText(el.textContent.trim()).then(function () {
+        var prev = btn.textContent;
+        btn.textContent = "Copied";
+        setTimeout(function () { btn.textContent = prev; }, 1200);
+      });
+    });
+  });
+
+  // Start/Stop post to the real DRF endpoints, which answer 202 + JSON rather
+  // than a redirect. Submit via fetch so the student stays on the page, then
+  // reload to re-read the box state. Provisioning is async (Celery), so the
+  // state may still be the old one on the next render -- say so instead of
+  // pretending the box flipped instantly.
+  document.querySelectorAll("form.js-lab-action").forEach(function (form) {
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var note = document.querySelector(".js-action-note");
+      var btn = form.querySelector("button");
+      btn.disabled = true;
+      fetch(form.action, {
+        method: "POST",
+        headers: {
+          "X-CSRFToken": form.querySelector("[name=csrfmiddlewaretoken]").value,
+          "Accept": "application/json"
+        },
+        credentials: "same-origin"
+      }).then(function (r) {
+        if (r.status === 202) {
+          if (note) note.textContent = "Queued — this takes a moment.";
+          setTimeout(function () { window.location.reload(); }, 4000);
+        } else {
+          if (note) note.textContent = "Request failed (" + r.status + ").";
+          btn.disabled = false;
+        }
+      }).catch(function () {
+        if (note) note.textContent = "Request failed.";
+        btn.disabled = false;
+      });
+    });
+  });
+</script>
+{% endblock %}

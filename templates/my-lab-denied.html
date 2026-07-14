@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% comment %}
+  Shown when a signed-in non-student opens /my-lab/ (rendered with status 403).
+  Mirrors the API's "Students only." 403 rather than leaking any lab data.
+{% endcomment %}
+{% block title %}My Lab — SethuAI CyberLab{% endblock %}
+
+{% block content %}
+<div class="page">
+  <div class="card" style="max-width:34rem;margin:var(--space-6) auto">
+    <div class="card-head"><span class="card-title">Students only</span></div>
+    <p class="small muted">
+      My Lab shows a student's own machine and VPN access. Your account is signed
+      in as <strong>{{ role|default:"a non-student role" }}</strong>, so there is
+      no lab to show here.
+    </p>
+    <p style="margin-top:var(--space-4)">
+      <a class="btn" href="{% url 'dashboard-page' %}">Go to dashboard</a>
+    </p>
+  </div>
+</div>
+{% endblock %}

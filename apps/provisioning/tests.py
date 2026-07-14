@@ -13,7 +13,7 @@ import tempfile
 from unittest import mock
 
 from django.core.cache import cache
-from django.test import override_settings
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -373,3 +373,161 @@ class WireGuardStatusTests(APITestCase):
         self.assertNotIn("StrictHostKeyChecking=no", joined)
         # user@host is a single argv element (no shell string).
         self.assertTrue(any(a.endswith("@192.168.100.7") for a in argv))
+
+
+# =========================================================================== #
+# B6.3 — the student "My Lab" HTML page                                       #
+# =========================================================================== #
+MY_LAB_PAGE_URL = "/my-lab/"
+
+
+class MyLabPageTests(TestCase):
+    """The page must be login-required and scoped to the CALLER's own lab.
+
+    Uses the session test client (force_login), not DRF force_authenticate:
+    this is a plain Django template view behind @login_required.
+    """
+
+    def setUp(self):
+        course = Course.objects.create(name="Track A", slug="track-a")
+        module = Module.objects.create(course=course, code="A1", title="AppSec")
+        exercise = LabExercise.objects.create(
+            module=module, title="Kali box", slug="kali-box"
+        )
+        self.students = {}
+        for idx in (1, 2):
+            username = f"student{idx:02d}"
+            user = User.objects.create_user(
+                username=username, password="pw", role=User.Role.STUDENT
+            )
+            sp = StudentProfile.objects.create(user=user, student_index=idx)
+            kali_ip = f"192.168.100.{149 + idx}"
+            lease = IPLease.objects.create(ip=kali_ip, state=IPLease.State.LEASED)
+            lab = LabInstance.objects.create(
+                owner_student=sp,
+                lab_exercise=exercise,
+                provisioning_mode=LabInstance.ProvisioningMode.PER_STUDENT,
+                status=LabInstance.Status.RUNNING,
+            )
+            vm = VMInstance.objects.create(
+                lab_instance=lab,
+                vmid=8999 + idx,
+                hostname=f"s{idx:02d}-kali-{8999 + idx}",
+                role=Role.ATTACKER,
+                ip=lease,
+                proxmox_status="running",
+            )
+            lease.vm_instance = vm
+            lease.save()
+            WireGuardPeer.objects.create(
+                student=sp,
+                vm_instance=vm,
+                tunnel_ip=f"10.13.13.{149 + idx}",
+                kali_ip=kali_ip,
+                client_pubkey=f"PUB{idx:02d}=",
+                config_secret_ref=f"{username}.conf",
+                active=True,
+            )
+            self.students[username] = {
+                "user": user, "sp": sp, "vm": vm, "kali_ip": kali_ip,
+                "tunnel_ip": f"10.13.13.{149 + idx}",
+            }
+
+    # ---- login required ---------------------------------------------------
+    def test_anonymous_is_redirected_to_login(self):
+        resp = self.client.get(MY_LAB_PAGE_URL)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/accounts/login/", resp["Location"])
+        # and it round-trips back to the page after signing in (Django leaves the
+        # path's slashes unescaped in ?next=)
+        self.assertIn(f"next={MY_LAB_PAGE_URL}", resp["Location"])
+
+    def test_login_round_trips_back_to_the_requested_page(self):
+        """@login_required -> login -> back to /my-lab/, not the landing page."""
+        resp = self.client.post(
+            "/accounts/login/",
+            {"username": "student01", "password": "pw", "next": MY_LAB_PAGE_URL},
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp["Location"], MY_LAB_PAGE_URL)
+
+    def test_login_ignores_an_offsite_next(self):
+        """?next= must not turn the login form into an open redirect."""
+        resp = self.client.post(
+            "/accounts/login/",
+            {"username": "student01", "password": "pw",
+             "next": "https://evil.example.com/phish"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertNotIn("evil.example.com", resp["Location"])
+        self.assertEqual(resp["Location"], MY_LAB_PAGE_URL)  # student landing
+
+    # ---- per-student scoping ---------------------------------------------
+    def test_page_shows_only_the_callers_own_lab(self):
+        me, other = self.students["student01"], self.students["student02"]
+        self.client.force_login(me["user"])
+        resp = self.client.get(MY_LAB_PAGE_URL)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        # my own box + tunnel are rendered ...
+        self.assertIn(me["vm"].hostname, body)
+        self.assertIn(me["tunnel_ip"], body)
+        self.assertIn(me["kali_ip"], body)
+        # ... and NOTHING of the other student's leaks in.
+        self.assertNotIn(other["vm"].hostname, body)
+        self.assertNotIn(other["tunnel_ip"], body)
+        self.assertNotIn(other["kali_ip"], body)
+
+    def test_client_supplied_ids_cannot_select_another_students_lab(self):
+        """The view takes no id: the box is resolved from request.user alone, so
+        every tampering shape a client can reach for is inert."""
+        me, other = self.students["student01"], self.students["student02"]
+        self.client.force_login(me["user"])
+        for query in (
+            f"?student={other['sp'].pk}",
+            f"?student_id={other['sp'].pk}",
+            f"?id={other['vm'].lab_instance_id}",
+            f"?vmid={other['vm'].vmid}",
+            f"?user={other['user'].username}",
+        ):
+            resp = self.client.get(MY_LAB_PAGE_URL + query)
+            self.assertEqual(resp.status_code, 200)
+            body = resp.content.decode()
+            self.assertIn(me["vm"].hostname, body, msg=query)
+            self.assertNotIn(other["vm"].hostname, body, msg=query)
+            self.assertNotIn(other["tunnel_ip"], body, msg=query)
+
+    # ---- role gate --------------------------------------------------------
+    def test_non_student_gets_403_and_no_lab_data(self):
+        staff = User.objects.create_user(
+            username="instructor01", password="pw", role=User.Role.INSTRUCTOR
+        )
+        self.client.force_login(staff)
+        resp = self.client.get(MY_LAB_PAGE_URL)
+        self.assertEqual(resp.status_code, 403)
+        body = resp.content.decode()
+        for s in self.students.values():
+            self.assertNotIn(s["vm"].hostname, body)
+            self.assertNotIn(s["tunnel_ip"], body)
+
+    def test_no_template_comment_markers_leak_into_the_page(self):
+        """Django's {# ... #} is SINGLE-LINE only: a multi-line one is not parsed
+        as a comment and gets emitted verbatim into the HTML. Catch that here
+        rather than in a screenshot."""
+        self.client.force_login(self.students["student01"]["user"])
+        body = self.client.get(MY_LAB_PAGE_URL).content.decode()
+        for marker in ("{#", "#}", "{% comment %}", "{% endcomment %}"):
+            self.assertNotIn(marker, body, msg=f"{marker} leaked into the page")
+
+    # ---- the page agrees with the API it renders --------------------------
+    def test_page_renders_the_same_box_the_api_returns(self):
+        me = self.students["student01"]
+        self.client.force_login(me["user"])
+        api = self.client.get(MY_LAB_URL)
+        self.assertEqual(api.status_code, 200)
+        page = self.client.get(MY_LAB_PAGE_URL)
+        self.assertEqual(page.status_code, 200)
+        # Same source of truth -> the API's own values appear on the page.
+        payload = api.json()
+        self.assertIn(payload["vms"][0]["hostname"], page.content.decode())
+        self.assertIn(payload["wireguard"]["tunnel_ip"], page.content.decode())

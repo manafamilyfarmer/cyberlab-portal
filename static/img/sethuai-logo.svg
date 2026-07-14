@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  PLACEHOLDER MARK — SethuAI CyberLab (B6.2).
+
+  This is NOT the official artwork. It is a stand-in that echoes the logo's idea
+  (a bridge whose cables resolve into a neural network — "where AI meets reality")
+  so the nav bar renders correctly on navy.
+
+  OPERATOR: replace this file in place with the official Sethu_AI_Logo-01.svg,
+  keeping the filename static/img/sethuai-logo.svg, then re-run collectstatic.
+  It MUST remain a real file: prod uses CompressedManifestStaticFilesStorage, so
+  a missing static target raises at template-render time rather than 404ing.
+
+  Drawn for a dark/navy background: strokes are white + brand cyan (#44e4fe).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 32" width="40" height="32"
+     role="img" aria-label="SethuAI">
+  <title>SethuAI</title>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- deck (the "reality" side of the bridge) -->
+    <path d="M2 23 H38" stroke="#ffffff" stroke-width="2"/>
+    <!-- suspension curve (the span) -->
+    <path d="M2 23 Q20 5 38 23" stroke="#44e4fe" stroke-width="2"/>
+    <!-- cables resolving into network edges -->
+    <path d="M11 23 V16.2 M20 23 V11 M29 23 V16.2" stroke="#05b6fe" stroke-width="1.4"
+          opacity="0.85"/>
+    <!-- network edges across the span -->
+    <path d="M11 16.2 L20 11 L29 16.2" stroke="#44e4fe" stroke-width="1.2"
+          opacity="0.7"/>
+    <!-- towers -->
+    <path d="M2 23 V15 M38 23 V15" stroke="#ffffff" stroke-width="2"/>
+  </g>
+  <!-- nodes -->
+  <g fill="#44e4fe">
+    <circle cx="20" cy="11" r="2.6"/>
+    <circle cx="11" cy="16.2" r="1.9"/>
+    <circle cx="29" cy="16.2" r="1.9"/>
+  </g>
+  <g fill="#ffffff">
+    <circle cx="2" cy="15" r="1.7"/>
+    <circle cx="38" cy="15" r="1.7"/>
+  </g>
+</svg>
