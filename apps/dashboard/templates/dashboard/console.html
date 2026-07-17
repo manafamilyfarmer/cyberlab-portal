@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% comment %}
+  Instructor console — B6.4.
+
+  Every value here comes from apps.dashboard.console.console_context(), which
+  builds on the same role-scoped querysets the APIs use. Nothing on this page is
+  sample content: a section with no rows renders an explicit empty state, and
+  the one thing the portal has no source for (isolation alerts) is rendered as a
+  labelled inert tile rather than a number. See console.py's docstring for the
+  real-vs-not inventory.
+{% endcomment %}
+{% block title %}Instructor console — SethuAI CyberLab{% endblock %}
+
+{% block content %}
+<div class="page stack" style="gap:var(--space-5)">
+
+  <div class="page-head">
+    <h1>Instructor console</h1>
+    <p class="sub">Live session view — roster, VPN, boxes and submissions.</p>
+  </div>
+
+  {# ------------------------------------------------------- batch header ---- #}
+  {% if batch %}
+    <section class="card">
+      <div class="row-between">
+        <div>
+          <span class="card-title">{{ batch.name }}</span>
+          <p class="card-note tight">
+            {{ batch.course.name }}
+            {% if batch.class_time %} · {{ batch.class_time }}{% endif %}
+            {% if batches|length > 1 %}
+              · <span class="muted">+{{ batches|length|add:"-1" }} more batch(es) in your scope</span>
+            {% endif %}
+          </p>
+        </div>
+        <div class="row">
+          <span class="pill {% if batch.is_active %}pill-success{% else %}pill-muted{% endif %}">
+            {% if batch.is_active %}Active{% else %}Inactive{% endif %}
+          </span>
+          <a class="btn" href="{{ request.path }}">Refresh</a>
+        </div>
+      </div>
+    </section>
+  {% else %}
+    <div class="notice">
+      No batch is assigned to your account yet, so there is no roster to show.
+      Ask an admin to set you as the instructor on a batch.
+    </div>
+  {% endif %}
+
+  {# ------------------------------------------------------- summary tiles --- #}
+  <div class="tile-row">
+    <div class="tile">
+      <div class="tile-value">{{ tiles.connected_now }} / {{ tiles.students_total }}</div>
+      <div class="tile-label">Connected now</div>
+      {% if tiles.status_unknown %}
+        <div class="tile-note">{{ tiles.status_unknown }} unknown (poller)</div>
+      {% endif %}
+    </div>
+
+    <div class="tile">
+      <div class="tile-value">{{ tiles.boxes_running }} / {{ tiles.students_total }}</div>
+      <div class="tile-label">Boxes running</div>
+      <div class="tile-note">Last known state</div>
+    </div>
+
+    <div class="tile">
+      <div class="tile-value">{{ tiles.to_review }}</div>
+      <div class="tile-label">To review</div>
+    </div>
+
+    {% comment %}
+      Isolation alerts: the portal EMITS audit JSON toward the SIEM and never
+      reads alerts back — there is no table, cache or endpoint behind this. It is
+      rendered numberless and greyed on purpose: a "0" here would be a lie that
+      reads as "no alerts" when it means "not wired up".
+    {% endcomment %}
+    <div class="tile tile-inert">
+      <div class="tile-value">Not wired up</div>
+      <div class="tile-label">Isolation alerts</div>
+      <div class="tile-note">Lives in Wazuh / Security Onion</div>
+    </div>
+  </div>
+
+  {# ------------------------------------------------------ student roster --- #}
+  <section class="card">
+    <div class="card-head">
+      <span class="card-title">Students</span>
+      <span class="card-note">
+        VPN status is live from the vpn01 poll; box state is the last state the
+        portal recorded.
+      </span>
+    </div>
+
+    {% if rows %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Student</th>
+              <th>Tunnel IP</th>
+              <th>Box IP</th>
+              <th>VPN</th>
+              <th>Box</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+              <tr>
+                <td>
+                  <span class="identity">
+                    <span class="avatar" aria-hidden="true">{{ r.initials }}</span>
+                    <span>
+                      <span class="name">{{ r.user.username }}</span>
+                      {% if r.user.get_full_name %}
+                        <span class="muted small"> · {{ r.user.get_full_name }}</span>
+                      {% endif %}
+                    </span>
+                  </span>
+                </td>
+
+                <td class="mono">{{ r.tunnel_ip|default:"—" }}</td>
+                <td class="mono">{{ r.box_ip|default:"—" }}</td>
+
+                <td>
+                  {% if not r.has_peer %}
+                    <span class="pill pill-muted">No peer</span>
+                  {% elif r.connected is True %}
+                    <span class="pill pill-success">Connected</span>
+                  {% elif r.connected is False %}
+                    <span class="pill pill-muted">Offline</span>
+                  {% else %}
+                    {% comment %}
+                      connected is None = poller cache miss. "Unknown", never
+                      "offline" — a dead poller is not a disconnection (B4.5).
+                    {% endcomment %}
+                    <span class="pill pill-warning">Unknown</span>
+                  {% endif %}
+                </td>
+
+                <td>
+                  {% if r.box_state == "running" %}
+                    <span class="pill pill-success">Running</span>
+                  {% elif r.box_state == "stopped" %}
+                    <span class="pill pill-muted">Stopped</span>
+                  {% elif r.box_state %}
+                    <span class="pill pill-warning">{{ r.box_state|capfirst }}</span>
+                  {% else %}
+                    <span class="pill pill-muted">None</span>
+                  {% endif %}
+                </td>
+
+                <td>
+                  <a class="btn"
+                     href="{% url 'instructor-student-detail' r.student.id %}">View</a>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty">
+        No students are enrolled in your batch(es) yet.
+      </div>
+    {% endif %}
+  </section>
+
+  {# ------------------------------------------------ submissions to review -- #}
+  <section class="card">
+    <div class="card-head">
+      <span class="card-title">Submissions to review</span>
+      <span class="card-note">Awaiting a final assessment</span>
+    </div>
+
+    {% if submissions %}
+      <div class="list">
+        {% for s in submissions %}
+          <div class="list-item">
+            <div>
+              <div class="title">{{ s.student.user.username }} — {{ s.lab_exercise.title }}</div>
+              <div class="meta">
+                {{ s.original_filename }} · {{ s.submitted_at }}
+              </div>
+            </div>
+            <div class="row">
+              {% if s.quarantined %}
+                <span class="pill pill-danger">Quarantined</span>
+              {% elif s.scan_status == "clean" %}
+                <span class="pill pill-success">Clean</span>
+              {% elif s.scan_status == "pending" %}
+                <span class="pill pill-warning">Scanning</span>
+              {% elif s.scan_status == "infected" %}
+                <span class="pill pill-danger">Infected</span>
+              {% else %}
+                <span class="pill pill-warning">Scan {{ s.scan_status }}</span>
+              {% endif %}
+              {% comment %}
+                There is no bespoke review UI yet (grading exists only as the
+                /api/admin/assessments API), so "Review" points at the admin
+                object as the interim flow.
+              {% endcomment %}
+              <a class="btn" href="{% url 'admin:assessments_submission_change' s.id %}">
+                Review
+              </a>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">
+        Nothing waiting — no submission in your scope needs a review right now.
+      </div>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}

@@ -22,6 +22,14 @@
       </a>
       <div class="nav-spacer"></div>
       {% if user.is_authenticated %}
+        {% comment %}
+          Staff-only nav entry. This is a CONVENIENCE gate, not the security
+          gate: the view itself enforces role + staff MFA, so hiding the link
+          never becomes the thing standing between a student and the page.
+        {% endcomment %}
+        {% if user.role == "instructor" or user.role == "admin" %}
+          <a class="nav-link" href="{% url 'instructor-console' %}">Instructor console</a>
+        {% endif %}
         <span class="nav-user">Signed in as <strong>{{ user.username }}</strong></span>
         {% comment %}
           Logout is a POST: a GET logout link is CSRF-triggerable by any page

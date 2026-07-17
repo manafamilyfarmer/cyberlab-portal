@@ -180,3 +180,25 @@ def get_status(peer_id) -> dict:
         "connected": v.get("connected"),
         "last_handshake": v.get("last_handshake"),
     }
+
+
+def get_status_many(peer_ids) -> dict:
+    """Batch reader for a roster (B6.4) — one cache round-trip for N peers.
+
+    Returns {peer_id: {"connected": ..., "last_handshake": ...}} with exactly the
+    same miss semantics as get_status(): no cache entry => unknown (None), never
+    False. Both readers share cache_key() and that rule, so the instructor's
+    roster pill and the student's own pill can never disagree about a peer.
+    """
+    ids = list(peer_ids)
+    if not ids:
+        return {}
+    found = cache.get_many([cache_key(i) for i in ids])
+    out = {}
+    for pid in ids:
+        v = found.get(cache_key(pid))
+        out[pid] = {
+            "connected": v.get("connected") if v else None,
+            "last_handshake": v.get("last_handshake") if v else None,
+        }
+    return out

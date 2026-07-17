@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% comment %}
+  Instructor console — one student (B6.4).
+
+  Staff-only drill-down. The row is taken from the caller's OWN scoped roster
+  (apps.dashboard.console.student_detail_context), so an out-of-scope student id
+  404s rather than rendering. Same real-vs-last-known caveats as the console:
+  the VPN pill is live, the box state is the last state the portal recorded.
+{% endcomment %}
+{% block title %}{{ row.user.username }} — Instructor console{% endblock %}
+
+{% block content %}
+<div class="page stack" style="gap:var(--space-5)">
+
+  <div class="page-head">
+    <p class="sub tight"><a href="{% url 'instructor-console' %}">← Back to console</a></p>
+    <h1>
+      <span class="identity">
+        <span class="avatar" aria-hidden="true">{{ row.initials }}</span>
+        <span>{{ row.user.username }}</span>
+      </span>
+    </h1>
+    {% if row.user.get_full_name %}
+      <p class="sub">{{ row.user.get_full_name }}{% if row.user.email %} · {{ row.user.email }}{% endif %}</p>
+    {% endif %}
+  </div>
+
+  <div class="grid">
+    {# ---------------------------------------------------- VPN connection ---- #}
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">VPN connection</span>
+        {% if not row.has_peer %}
+          <span class="pill pill-muted">No peer</span>
+        {% elif row.connected is True %}
+          <span class="pill pill-success">Connected</span>
+        {% elif row.connected is False %}
+          <span class="pill pill-muted">Offline</span>
+        {% else %}
+          <span class="pill pill-warning">Status unknown</span>
+        {% endif %}
+      </div>
+      <div class="data-row">
+        <span class="key">Tunnel IP</span>
+        <span class="val mono">{{ row.tunnel_ip|default:"—" }}</span>
+      </div>
+      <div class="data-row">
+        <span class="key">Last handshake</span>
+        <span class="val">
+          {% if row.last_handshake %}{{ row.last_handshake }}
+          {% else %}<span class="muted">Never</span>{% endif %}
+        </span>
+      </div>
+    </section>
+
+    {# --------------------------------------------------------- their box ---- #}
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">Their box</span>
+        {% if row.box_state == "running" %}
+          <span class="pill pill-success">Running</span>
+        {% elif row.box_state == "stopped" %}
+          <span class="pill pill-muted">Stopped</span>
+        {% elif row.box_state %}
+          <span class="pill pill-warning">{{ row.box_state|capfirst }}</span>
+        {% else %}
+          <span class="pill pill-muted">None</span>
+        {% endif %}
+      </div>
+      {% if row.vm %}
+        <div class="data-row">
+          <span class="key">Hostname</span>
+          <span class="val mono">{{ row.vm.hostname|default:"—" }}</span>
+        </div>
+        <div class="data-row">
+          <span class="key">VMID</span>
+          <span class="val mono">{{ row.vm.vmid|default:"—" }}</span>
+        </div>
+        <div class="data-row">
+          <span class="key">Box IP</span>
+          <span class="val mono">{{ row.box_ip|default:"—" }}</span>
+        </div>
+        <p class="small muted" style="margin-top:var(--space-3)">
+          Box state is the last state the portal recorded when it cloned, started
+          or stopped this VM — it is not a live hypervisor poll.
+        </p>
+      {% else %}
+        <div class="empty">No box is provisioned for this student.</div>
+      {% endif %}
+    </section>
+  </div>
+
+  {# ---------------------------------------------------------- submissions -- #}
+  <section class="card">
+    <div class="card-head">
+      <span class="card-title">Submissions</span>
+      <span class="card-note">All submissions from this student in your scope</span>
+    </div>
+    {% if submissions %}
+      <div class="list">
+        {% for s in submissions %}
+          <div class="list-item">
+            <div>
+              <div class="title">{{ s.lab_exercise.title }}</div>
+              <div class="meta">{{ s.original_filename }} · {{ s.submitted_at }}</div>
+            </div>
+            <div class="row">
+              {% if s.quarantined %}
+                <span class="pill pill-danger">Quarantined</span>
+              {% elif s.scan_status == "clean" %}
+                <span class="pill pill-success">Clean</span>
+              {% elif s.scan_status == "pending" %}
+                <span class="pill pill-warning">Scanning</span>
+              {% elif s.scan_status == "infected" %}
+                <span class="pill pill-danger">Infected</span>
+              {% else %}
+                <span class="pill pill-warning">Scan {{ s.scan_status }}</span>
+              {% endif %}
+              <a class="btn" href="{% url 'admin:assessments_submission_change' s.id %}">
+                Review
+              </a>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">This student has not submitted anything yet.</div>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}

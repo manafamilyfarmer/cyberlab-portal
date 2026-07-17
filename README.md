@@ -25,14 +25,34 @@ Secrets are **never** committed. They live on VM114 only, mode 600:
 
 `.env.example` documents the shape (keys only, no values).
 
-## Deploy (VM114)
+## Deploy (VM114) — git pull, never a copy
+
+`/opt/cyberlab-portal/app` on VM114 **is a git checkout** on branch `main`,
+tracking `origin/main` through a read-only deploy key. Deploying = pulling the
+commit you already pushed, so what runs in the lab is always a named commit you
+can `git log`.
 
 ```sh
+# on VM114, as the operator (the checkout is owned by cyberadmin):
 cd /opt/cyberlab-portal/app
-docker compose build
-docker compose up -d
-docker compose exec -T web python manage.py migrate
+git pull                       # fast-forward to the pushed commit
+sudo docker compose build web  # web holds `build: .`; worker/beat share the image
+sudo docker compose up -d
 ```
+
+Add `docker compose exec -T web /app/entrypoint.sh python manage.py migrate`
+when the step ships a migration.
+
+The image is **baked** — there is no app bind-mount — so `build web` is what
+makes new code (and `collectstatic`'s fingerprinted assets) take effect.
+`git pull` alone changes nothing that is running.
+
+> **Why this is written down.** VM114 used to hold a *detached copy* of the tree
+> that was rsynced into place. Nothing tied it to a commit, so a partial sync
+> left stale assets serving next to fresh templates and the drift was invisible —
+> the checkout has no "which commit am I?" answer when it isn't a checkout. If
+> you ever find yourself about to `rsync`/`scp` source onto VM114, that is the
+> incident restarting: push to `origin` and pull instead.
 
 ## Health
 
